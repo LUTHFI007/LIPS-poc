@@ -1,0 +1,46 @@
+2026-05-12 16:09:00 - TorchSimulator            - INFO    : Training of {torch_fc_DEFAULT} started
+2026-05-12 16:09:31 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is saved at {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:09:31 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is saved at {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:09:41 - TorchSimulator            - INFO    : Training of {torch_fc_DEFAULT} started
+2026-05-12 16:10:12 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is saved at {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:10:12 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is saved at {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:15:24 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is loaded from {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:15:28 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using torch_fc_DEFAULT on test dataset
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 16359.93
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 31827.29
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 78.20
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 108.39
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 57764333718863872.00
+2026-05-12 16:15:29 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 82664917718532096.00
+2026-05-12 16:17:30 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is loaded from {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:17:32 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using torch_fc_DEFAULT on test dataset
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 16359.93
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 31827.29
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 78.20
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 108.39
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 57764333718863872.00
+2026-05-12 16:17:33 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 82664917718532096.00
+2026-05-12 16:19:50 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is loaded from {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:19:54 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using torch_fc_DEFAULT on test dataset
+2026-05-12 16:19:54 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 16359.93
+2026-05-12 16:19:54 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 31827.29
+2026-05-12 16:19:54 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 78.20
+2026-05-12 16:19:54 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 108.39
+2026-05-12 16:19:54 - PhysicsCompliances        - INFO    : Current positivity check passed for a_or
+2026-05-12 16:19:54 - PhysicsCompliances        - INFO    : Current positivity check passed for a_ex
+2026-05-12 16:20:32 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is loaded from {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:20:36 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using torch_fc_DEFAULT on test dataset
+2026-05-12 16:20:36 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 16359.93
+2026-05-12 16:20:36 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 31827.29
+2026-05-12 16:20:36 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 78.20
+2026-05-12 16:20:36 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 108.39
+2026-05-12 16:20:36 - PhysicsCompliances        - INFO    : Current positivity check passed for a_or
+2026-05-12 16:20:36 - PhysicsCompliances        - INFO    : Current positivity check passed for a_ex
+2026-05-12 16:21:33 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is loaded from {/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox/Benchmark1/torch_fc_DEFAULT}
+2026-05-12 16:21:36 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using torch_fc_DEFAULT on test dataset
+2026-05-12 16:21:36 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 16359.93
+2026-05-12 16:21:36 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 31827.29
+2026-05-12 16:21:36 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 78.20
+2026-05-12 16:21:36 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 108.39
+2026-05-12 16:21:36 - PhysicsCompliances        - INFO    : Current positivity check passed for a_or
+2026-05-12 16:21:36 - PhysicsCompliances        - INFO    : Current positivity check passed for a_ex
