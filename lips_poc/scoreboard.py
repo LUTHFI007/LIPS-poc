@@ -12,20 +12,17 @@ _BETA = 0.5
 
 def evaluate_model(
     model_path: str,
-    dataset_path: str,
-    username: str,
     model_name: str,
 ) -> dict:
     try:
-        ml_score, physics_score = _run_lips_benchmark(model_path, dataset_path)
+        ml_score, physics_score = _run_lips_benchmark(model_path)
     except Exception as e:
         print(f"LIPS evaluation failed, using mock scores. Reason: {e}")
-        ml_score, physics_score = _mock_scores(model_path, dataset_path)
+        ml_score, physics_score = _mock_scores(model_path)
 
     final_score = _ALPHA * ml_score + _BETA * physics_score
 
     return {
-        "username": username,
         "model_name": model_name,
         "ml_score": round(ml_score, 6),
         "physics_score": round(physics_score, 6),
@@ -45,7 +42,7 @@ def save_result(result_dict: dict) -> None:
 
 
 def load_scoreboard() -> pd.DataFrame:
-    cols = ["username", "model_name", "ml_score", "physics_score", "final_score", "timestamp"]
+    cols = ["model_name", "ml_score", "physics_score", "final_score", "timestamp"]
     if not SCOREBOARD_FILE.exists():
         return pd.DataFrame(columns=cols)
     with SCOREBOARD_FILE.open("r", encoding="utf-8") as f:
@@ -59,7 +56,7 @@ def load_scoreboard() -> pd.DataFrame:
     )
 
 
-def _run_lips_benchmark(model_path: str, dataset_path: str) -> tuple[float, float]:
+def _run_lips_benchmark(model_path: str) -> tuple[float, float]:
     from lips.benchmark.powergridBenchmark import PowerGridBenchmark
     from lips.augmented_simulators.torch_simulator import TorchSimulator
     from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
@@ -122,8 +119,8 @@ def _run_lips_benchmark(model_path: str, dataset_path: str) -> tuple[float, floa
     return ml_score, physics_score
 
 
-def _mock_scores(model_path: str, dataset_path: str) -> tuple[float, float]:
-    seed = hash(model_path + dataset_path) & 0xFFFF
+def _mock_scores(model_path: str) -> tuple[float, float]:
+    seed = hash(model_path) & 0xFFFF
     ml_score = 0.5 + (seed % 1000) / 2000.0
     physics_score = 0.4 + (seed % 800) / 2000.0
     return ml_score, physics_score
