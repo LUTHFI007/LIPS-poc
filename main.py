@@ -1,16 +1,16 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
-import gradio as gr
 import pandas as pd
+import streamlit as st
 
 from lips_poc.data_hub import search_datasets
 from lips_poc.model_hub import search_models
+from evaluation_runner import run_evaluation, extract_scores
 
 _ROOT = Path(__file__).parent
 
-_DS_COLS = ["Select", "Dataset ID", "Last Modified", "URL"]
-_M_COLS  = ["Select", "Model ID",   "Last Modified", "URL"]
 _SB_COLS = [
     "Model", "Dataset", "Benchmark",
     "MSE", "MAE", "MAPE_90",
@@ -18,90 +18,144 @@ _SB_COLS = [
     "Physics Viol. %", "Timestamp",
 ]
 
-_EMPTY_DATASETS = pd.DataFrame(columns=_DS_COLS)
-_EMPTY_MODELS   = pd.DataFrame(columns=_M_COLS)
+SCOREBOARD_FILE = _ROOT / "scoreboard.json"
 
-_DS_DATATYPES = ["bool", "str", "str", "html"]
-_M_DATATYPES  = ["bool", "str", "str", "html"]
-
-
-def _linkify(url: str) -> str:
-    return f'<a href="{url}" target="_blank">{url}</a>'
+with (_ROOT / "dataset_registry.json").open() as f:
+    DATASET_REGISTRY = json.load(f)
 
 
-def _load_datasets() -> pd.DataFrame:
+@st.cache_data(ttl=300)
+def _fetch_datasets() -> list[dict]:
+    return search_datasets("")
+
+
+@st.cache_data(ttl=300)
+def _fetch_models() -> list[dict]:
+    return search_models("")
+
+
+def _load_scoreboard() -> pd.DataFrame:
     try:
-        rows = search_datasets("")
-        if not rows:
-            return _EMPTY_DATASETS
-        df = pd.DataFrame(rows)
-        df.insert(0, "Select", False)
-        df["URL"] = df["URL"].apply(_linkify)
-        return df
-    except Exception:
-        return _EMPTY_DATASETS
+        with SCOREBOARD_FILE.open() as f:
+            rows = json.load(f)
+        return pd.DataFrame(rows, columns=_SB_COLS)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=_SB_COLS)
 
 
-def _load_models() -> pd.DataFrame:
-    try:
-        rows = search_models("")
-        if not rows:
-            return _EMPTY_MODELS
-        df = pd.DataFrame(rows)
-        df.insert(0, "Select", False)
-        df["URL"] = df["URL"].apply(_linkify)
-        return df
-    except Exception:
-        return _EMPTY_MODELS
+def _save_scoreboard(df: pd.DataFrame) -> None:
+    with SCOREBOARD_FILE.open("w") as f:
+        json.dump(df.to_dict(orient="records"), f, indent=2)
 
 
-def _enforce_single(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    selected = df.index[df["Select"].astype(bool)].tolist()
-    if len(selected) > 1:
-        df = df.copy()
-        df["Select"] = False
-        df.loc[selected[-1], "Select"] = True
-    return df
+# Clear stale selections on every new browser session
+if "initialized" not in st.session_state:
+    st.session_state.selected_dataset = None
+    st.session_state.selected_model   = None
+    st.session_state.initialized      = True
 
+# ── Page setup ────────────────────────────────────────────────────────────────
 
-def build_app() -> gr.Blocks:
-    with gr.Blocks(title="LIPS Power Grid Benchmark") as app:
-        gr.Markdown("# LIPS Power Grid Benchmark POC")
+st.set_page_config(page_title="LIPS Power Grid Benchmark", layout="wide")
+st.title("LIPS Power Grid Benchmark POC")
 
-        with gr.Tabs():
+tab_data, tab_model, tab_scoreboard = st.tabs(["Data Hub", "Model Hub", "Scoreboard"])
 
-            with gr.Tab("Data Hub"):
-                ds_table = gr.DataFrame(
-                    value=_EMPTY_DATASETS,
-                    datatype=_DS_DATATYPES,
-                    interactive=True,
-                    wrap=True,
-                )
-                ds_table.input(fn=_enforce_single, inputs=ds_table, outputs=ds_table)
-                app.load(_load_datasets, outputs=ds_table)
+# ── Data Hub ──────────────────────────────────────────────────────────────────
 
-            with gr.Tab("Model Hub"):
-                m_table = gr.DataFrame(
-                    value=_EMPTY_MODELS,
-                    datatype=_M_DATATYPES,
-                    interactive=True,
-                    wrap=True,
-                )
-                m_table.input(fn=_enforce_single, inputs=m_table, outputs=m_table)
-                app.load(_load_models, outputs=m_table)
+with tab_data:
+    st.subheader("Data Hub")
+    st.caption("Click a row to select it.")
+    datasets = _fetch_datasets()
+    if not datasets:
+        st.warning("No datasets found on HuggingFace (lips-poc org).")
+    else:
+        ds_df = pd.DataFrame(datasets)
+        ds_event = st.dataframe(
+            ds_df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="ds_table",
+        )
+        selected_ds_rows = ds_event.selection.rows
+        if selected_ds_rows:
+            st.session_state.selected_dataset = ds_df.iloc[selected_ds_rows[0]]["Dataset ID"]
+            st.success(f"Selected: **{st.session_state.selected_dataset}**")
 
-            with gr.Tab("Scoreboard"):
-                gr.Button("Evaluate", variant="primary")
-                gr.DataFrame(
-                    value=pd.DataFrame(columns=_SB_COLS),
-                    interactive=False,
-                    wrap=True,
-                )
+# ── Model Hub ─────────────────────────────────────────────────────────────────
 
-    return app
+with tab_model:
+    st.subheader("Model Hub")
+    st.caption("Click a row to select it.")
+    models = _fetch_models()
+    if not models:
+        st.warning("No models found on HuggingFace (lips-poc org).")
+    else:
+        m_df = pd.DataFrame(models)
+        m_event = st.dataframe(
+            m_df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="m_table",
+        )
+        selected_m_rows = m_event.selection.rows
+        if selected_m_rows:
+            st.session_state.selected_model = m_df.iloc[selected_m_rows[0]]["Model ID"]
+            st.success(f"Selected: **{st.session_state.selected_model}**")
 
+# ── Scoreboard ────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    build_app().queue().launch()
+with tab_scoreboard:
+    st.subheader("Scoreboard")
+
+    sel_ds = st.session_state.get("selected_dataset")
+    sel_m  = (st.session_state.get("selected_model") or "").removesuffix("_DEFAULT") or None
+
+    col1, col2 = st.columns(2)
+    col1.metric("Selected Dataset", sel_ds or "None")
+    col2.metric("Selected Model",   sel_m  or "None")
+
+    if st.button("Evaluate", type="primary"):
+        if not sel_ds:
+            st.error("Please select a dataset in the Data Hub tab first.")
+        elif not sel_m:
+            st.error("Please select a model in the Model Hub tab first.")
+        else:
+            ds_key = sel_ds if sel_ds in DATASET_REGISTRY else sel_ds.split("/")[-1]
+            if ds_key not in DATASET_REGISTRY:
+                st.error(f"'{ds_key}' not found in dataset_registry.json.")
+            else:
+                with st.spinner("Downloading model and running evaluation — this may take a few minutes…"):
+                    try:
+                        results = run_evaluation(
+                            dataset_info=DATASET_REGISTRY[ds_key],
+                            model_repo_id=sel_m,
+                        )
+                        scores = extract_scores(results)
+                    except Exception as e:
+                        import traceback
+                        st.error(f"Evaluation failed: {e}\n\n```\n{traceback.format_exc()}\n```")
+                        st.stop()
+
+                new_row = {
+                    "Model":     sel_m.split("/")[-1],
+                    "Dataset":   ds_key,
+                    "Benchmark": DATASET_REGISTRY[ds_key]["benchmark_name"],
+                    **scores,
+                    "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                }
+                df = _load_scoreboard()
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                _save_scoreboard(df)
+                st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
+                st.rerun()
+
+    st.dataframe(
+        _load_scoreboard(),
+        use_container_width=True,
+        hide_index=True,
+    )

@@ -1,12 +1,14 @@
 # IMPORTANT: Do NOT add top-level LIPS/TF/Torch imports here.
 # TensorFlow runs a full GPU/CUDA probe on import, crashing the app
-# before Gradio launches. All heavy imports are deferred into the
+# before Streamlit launches. All heavy imports are deferred into the
 # functions that need them and only execute when Evaluate is clicked.
 
 import pathlib
 from typing import Optional
 
 from huggingface_hub import snapshot_download, ModelCard
+
+_MODELS_DIR = pathlib.Path(__file__).parent / "models"
 
 # Fallback: infer model type from repo name if no HF tag is set.
 # Keys are checked in order — more specific keys must come first.
@@ -16,20 +18,6 @@ NAME_FALLBACK = {
     "torch_fc":   "torch_fc",
     "dc":         "dc_approximation",
 }
-
-
-def _get_model_class_map() -> dict:
-    from lips.augmented_simulators.tensorflow_simulator import TensorflowSimulator
-    from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import TfFullyConnectedPowerGrid
-    from lips.augmented_simulators.tensorflow_models.powergrid.leap_net import LeapNet
-    from lips.augmented_simulators.torch_simulator import TorchSimulator
-    from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
-    return {
-        "tf_fc":            (TensorflowSimulator, TfFullyConnectedPowerGrid),
-        "tf_leapnet":       (TensorflowSimulator, LeapNet),
-        "torch_fc":         (TorchSimulator,      TorchFullyConnected),
-        "dc_approximation": None,
-    }
 
 
 def _resolve_model_type(repo_id: str) -> str:
@@ -50,33 +38,130 @@ def _resolve_model_type(repo_id: str) -> str:
     )
 
 
-def _download_model(repo_id: str) -> str:
-    return snapshot_download(repo_id=repo_id)
+def _download_model(repo_id: str) -> tuple[str, str]:
+    """
+    Download model files into models/{repo_slug}_DEFAULT/.
+    LIPS appends _DEFAULT to the name it receives, so we pass repo_slug as the
+    name and LIPS constructs repo_slug_DEFAULT — which is exactly the folder.
+    Returns (restore_base_path, model_files_path).
+    """
+    repo_slug = repo_id.replace("/", "--")
+    lips_dir  = _MODELS_DIR / (repo_slug + "_DEFAULT")
+
+    if not lips_dir.exists():
+        lips_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(repo_id=repo_id, local_dir=str(lips_dir))
+
+    # LIPS looks for weights.h5 but HF stores it as model.weights.h5
+    src = lips_dir / "model.weights.h5"
+    dst = lips_dir / "weights.h5"
+    if src.exists() and not dst.exists():
+        dst.symlink_to(src)
+
+    return str(_MODELS_DIR), str(lips_dir)
 
 
-def _load_simulator(repo_id: str, local_path: str, attr_x, attr_y, attr_tau):
-    model_type = _resolve_model_type(repo_id)
-    name = pathlib.Path(local_path).name
+def _load_simulator(model_type: str, restore_base: str, model_files: str, dataset_info: dict):
+    restore_base_path = pathlib.Path(restore_base)
+    model_files_path  = pathlib.Path(model_files)
 
     if model_type == "dc_approximation":
         from lips.physical_simulator.dcApproximationAS import DCApproximationAS
         return DCApproximationAS(name="dc_approximation")
 
-    model_class_map = _get_model_class_map()
-    entry = model_class_map.get(model_type)
-    if entry is None:
+    bench_ini_name = pathlib.Path(dataset_info["config_path"]).name
+    sim_ini_files  = [f for f in model_files_path.glob("*.ini") if f.name != bench_ini_name]
+    if not sim_ini_files:
+        raise ValueError(f"No simulator .ini config found in {model_files_path}")
+    sim_config_path = str(sim_ini_files[0])
+
+    # LIPS appends "_DEFAULT" to name in __init__.
+    # Pass the folder name without "_DEFAULT" so LIPS produces the exact folder name.
+    lips_name = model_files_path.name.removesuffix("_DEFAULT")
+
+    if model_type in ("tf_fc", "tf_leapnet"):
+        import re
+        import h5py
+        import tensorflow as tf
+        from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import TfFullyConnectedPowerGrid
+        from lips.augmented_simulators.tensorflow_models.powergrid.leap_net import LeapNet
+
+        base_cls = TfFullyConnectedPowerGrid if model_type == "tf_fc" else LeapNet
+
+        _mtype = model_type  # capture for use inside the class
+
+        class _SimWrapper(base_cls):
+            def _post_process(self, dataset, predictions):
+                if _mtype != "tf_leapnet":
+                    return super()._post_process(dataset, predictions)
+                # LeapNet's Keras model returns a list of arrays (one per attr_y).
+                # Convert to the {attr_name: array} dict the evaluator expects.
+                if self.scaler is not None:
+                    predictions = self.scaler.inverse_transform(predictions)
+                if isinstance(predictions, list):
+                    return dict(zip(self._leap_net_model.attr_y, predictions))
+                return dataset.reconstruct_output(predictions)
+
+            def _load_model(self, path):
+                tf.keras.backend.clear_session()
+
+                if _mtype != "tf_fc":
+                    # LeapNet uses ProxyLeapNet.load_data — no Keras load_weights involved
+                    super()._load_model(path)
+                    return
+
+                # tf_fc: Keras 3 legacy loader misreads the .weights.h5 format.
+                # Load weights directly from h5py by index to bypass it.
+                path = pathlib.Path(path)
+                weights_file = path / "model.weights.h5"
+                if not weights_file.exists():
+                    weights_file = path / "weights.h5"
+                if not weights_file.exists():
+                    raise FileNotFoundError(f"No weights file found in {path}")
+
+                self.build_model()
+
+                def _layer_sort_key(name):
+                    m = re.search(r'_(\d+)$', name)
+                    return int(m.group(1)) if m else -1
+
+                with h5py.File(str(weights_file), 'r') as f:
+                    if 'layers' not in f:
+                        raise ValueError(f"Unrecognised weights format in {weights_file}")
+                    saved_keys = sorted(
+                        [k for k in f['layers'] if len(f['layers'][k].get('vars', {})) > 0],
+                        key=_layer_sort_key,
+                    )
+                    model_layers = [l for l in self._model.layers if l.weights]
+                    for layer, key in zip(model_layers, saved_keys):
+                        g = f['layers'][key]['vars']
+                        layer.set_weights([g[str(i)][:] for i in range(len(g))])
+
+        sim = _SimWrapper(
+            name=lips_name,
+            sim_config_path=sim_config_path,
+            bench_config_path=dataset_info["config_path"],
+            bench_config_name=dataset_info["benchmark_name"],
+            log_path=None,
+        )
+
+    elif model_type == "torch_fc":
+        from lips.augmented_simulators.torch_simulator import TorchSimulator
+        from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
+
+        sim = TorchSimulator(
+            model=TorchFullyConnected,
+            sim_config_path=sim_config_path,
+            name=lips_name,
+            bench_config_path=dataset_info["config_path"],
+            bench_config_name=dataset_info["benchmark_name"],
+            log_path=None,
+        )
+
+    else:
         raise ValueError(f"Unknown model type: '{model_type}'")
 
-    simulator_cls, model_cls = entry
-    sim = simulator_cls(
-        name=name,
-        model=model_cls,
-        scaler=None,
-        attr_x=attr_x,
-        attr_y=attr_y,
-        attr_tau=attr_tau,
-    )
-    sim.restore(path=local_path)
+    sim.restore(path=str(restore_base_path))
     return sim
 
 
@@ -87,18 +172,29 @@ def run_evaluation(
 ) -> dict:
     from lips.benchmark.powergridBenchmark import PowerGridBenchmark
 
+    model_type   = _resolve_model_type(model_repo_id)
+    restore_base, model_files = _download_model(model_repo_id)
+    simulator    = _load_simulator(model_type, restore_base, model_files, dataset_info)
+
     benchmark = PowerGridBenchmark(
         benchmark_name=dataset_info["benchmark_name"],
         benchmark_path=dataset_info["dataset_root"],
         load_data_set=True,
         config_path=dataset_info["config_path"],
     )
-    attr_x   = benchmark.config.get_option("attr_x")
-    attr_y   = benchmark.config.get_option("attr_y")
-    attr_tau = benchmark.config.get_option("attr_tau")
 
-    local_path = _download_model(model_repo_id)
-    simulator  = _load_simulator(model_repo_id, local_path, attr_x, attr_y, attr_tau)
+    # _topo_vect_transformer is set only during training and never persisted.
+    if model_type == "tf_fc":
+        # process_dataset(training=True) safely sets the transformer for fc models.
+        simulator.process_dataset(benchmark._test_dataset, training=True)
+    elif model_type == "tf_leapnet":
+        # For LeapNet, process_dataset(training=True) also calls
+        # _leap_net_model.init() which corrupts the loaded weights.
+        # Set the transformer directly instead.
+        from lips.augmented_simulators.tensorflow_models.powergrid.utils import TopoVectTransformation
+        simulator._topo_vect_transformer = TopoVectTransformation(
+            simulator.bench_config, simulator.params, benchmark._test_dataset
+        )
 
     all_results = {}
     for split in eval_splits:

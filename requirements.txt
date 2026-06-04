@@ -1,4 +1,4 @@
 huggingface_hub
 datasets
-gradio
+streamlit
 pandas

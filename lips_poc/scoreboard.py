@@ -61,9 +61,10 @@ def _run_lips_benchmark(model_path: str) -> tuple[float, float]:
     from lips.augmented_simulators.torch_simulator import TorchSimulator
     from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
 
-    BENCH_CONFIG_PATH = "/home/luthfi/LIPS/lips/tests/configs/powergrid/benchmarks/l2rpn_case14_sandbox.ini"
-    SIM_CONFIG_PATH = "/home/luthfi/LIPS/lips/tests/configs/powergrid/simulators/torch_fc.ini"
-    BENCHMARK_PATH = "/home/luthfi/LIPS/reference_data/powergrid/l2rpn_case14_sandbox"
+    _ROOT = Path(__file__).parent.parent
+    BENCH_CONFIG_PATH = str(_ROOT / "configurations/powergrid/benchmarks/l2rpn_case14_sandbox.ini")
+    SIM_CONFIG_PATH   = str(_ROOT / "configurations/powergrid/simulators/torch_fc.ini")
+    BENCHMARK_PATH    = str(_ROOT / "datasets/powergrid/l2rpn_case14_sandbox")
 
     benchmark = PowerGridBenchmark(
         benchmark_path=BENCHMARK_PATH,

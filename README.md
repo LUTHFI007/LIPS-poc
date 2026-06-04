@@ -1,6 +1,6 @@
 # LIPS Power Grid Benchmark — POC
 
-A Gradio web app that lets you browse power-grid datasets and models on HuggingFace and evaluate surrogate models against the [LIPS benchmark](https://github.com/IRT-SystemX/LIPS). This is a Proof of Concept(PoC) created as part of building a Pipeline to Automate LIPS Banchmarks.
+A Streamlit web app that lets you browse power-grid datasets and models on HuggingFace, select them, and run LIPS benchmark evaluations against a ranked leaderboard. This is a Proof of Concept created as part of building a pipeline to automate LIPS benchmarks.
 
 ---
 
@@ -23,48 +23,58 @@ The app has three tabs:
 
 | Tab | What it does |
 |---|---|
-| **Data Hub** | Search HuggingFace for power-grid datasets. Click any URL to open it in a new tab. |
-| **Model Hub** | Search HuggingFace for power-grid models. Click any URL to open it in a new tab. |
-| **Scoreboard** | Upload a trained model + dataset, run LIPS evaluation, and view the ranked leaderboard. |
+| **Data Hub** | Lists power-grid datasets from the `lips-poc` HuggingFace org. Click a row to select a dataset for evaluation. |
+| **Model Hub** | Lists power-grid models from the `lips-poc` HuggingFace org. Click a row to select a model for evaluation. |
+| **Scoreboard** | Shows the selected dataset and model, runs LIPS evaluation on click, and displays the ranked leaderboard. |
+
+Supported model types (auto-detected from the HuggingFace repo name or model card tag):
+
+| Model type tag | Architecture |
+|---|---|
+| `torch_fc` | PyTorch fully-connected |
+| `tf_fc` | TensorFlow/Keras fully-connected |
+| `tf_leapnet` | TensorFlow LeapNet |
 
 ---
 
 ## 2. How the pipeline works
 
 ```
-User uploads model + dataset
+User selects dataset + model in the UI, clicks Evaluate
         │
         ▼
-  scoreboard.py
+  evaluation_runner.py
+  ├── _resolve_model_type()   — reads HF model card tag, falls back to repo name
+  ├── _download_model()       — snapshots model files into models/<repo-slug>_DEFAULT/
+  ├── _load_simulator()       — builds the correct LIPS augmented simulator and restores weights
+  └── run_evaluation()        — runs benchmark.evaluate_simulator() for test + test_ood_topo splits
         │
         ▼
-  save_result() → scoreboard.json
+  extract_scores()            — pulls MSE / MAE / MAPE_90 and Physics Violation % from raw results
         │
         ▼
-  load_scoreboard() → sorted DataFrame → Leaderboard table
+  scoreboard.json             — new row appended, leaderboard re-rendered in the UI
 ```
 
-**Scoring formula**
+**Scoreboard columns**
 
-```
-final_score = α × ml_score + β × physics_score
-              α = 0.5,  β = 0.5
-```
-
-- `ml_score` — derived from mean MAE across all output variables, normalized against a 200 A reference: `max(0, 1 − MAE/200)`
-- `physics_score` — derived from current constraint violation proportion: `max(0, 1 − avg_violation)`
+| Column | Description |
+|---|---|
+| MSE / MAE / MAPE_90 | ML metrics on the in-distribution test set |
+| MSE (ood) / MAE (ood) / MAPE_90 (ood) | ML metrics on the out-of-distribution topology test set |
+| Physics Viol. % | Average current-constraint violation percentage |
 
 **Data Hub / Model Hub**
 
 ```
-User types keyword (default: "powergrid")
+App loads on startup (cached 5 min)
         │
         ▼
-  HfApi().list_datasets(search=keyword, limit=50)
-  HfApi().list_models(search=keyword, limit=50)
+  HfApi().list_datasets(author="lips-poc", limit=50)
+  HfApi().list_models(author="lips-poc", limit=50)
         │
         ▼
-  Results rendered in DataFrame with clickable HuggingFace URLs
+  Results rendered in interactive Streamlit dataframe (click to select)
 ```
 
 ---
@@ -74,8 +84,8 @@ User types keyword (default: "powergrid")
 - Windows 10 (build 19041+) or Windows 11
 - WSL 2 enabled
 - Ubuntu 22.04 (or 24.04) from the Microsoft Store
-- Python 3.10+ (Python 3.13 was used in development)
-- ~4 GB free disk space for LIPS reference data
+- Miniconda or Python 3.10 inside WSL
+- ~4 GB free disk space for LIPS reference data and model downloads
 
 ---
 
@@ -130,9 +140,33 @@ sudo apt install -y git
 
 ---
 
-## 5. App setup
+## 5. LIPS library setup
 
-### 5.1 Clone this repository
+The LIPS library and its heavy dependencies (TensorFlow, PyTorch, Grid2Op, leap_net) must be installed separately into the conda/venv environment before running the app.
+
+```bash
+# recommended: use a conda env with Python 3.10
+conda create -n venv_poc python=3.10 -y
+conda activate venv_poc
+
+# install LIPS and all power-grid extras
+pip install lips[powergrid]
+
+# leap_net is required for tf_leapnet models
+pip install leap_net
+```
+
+The benchmark reference datasets must be downloaded once and placed at the path configured in `dataset_registry.json`:
+
+```
+datasets/powergrid/l2rpn_case14_sandbox/
+```
+
+---
+
+## 6. App setup
+
+### 6.1 Clone this repository
 
 ```bash
 cd ~
@@ -140,14 +174,13 @@ git clone https://github.com/LUTHFI007/lips-poc
 cd lips-poc
 ```
 
-### 5.2 Create a virtual environment (recommended)
+### 6.2 Activate the environment
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+conda activate venv_poc
 ```
 
-### 5.3 Install dependencies
+### 6.3 Install app dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -158,35 +191,48 @@ pip install -r requirements.txt
 ```
 huggingface_hub
 datasets
-gradio
+streamlit
 pandas
 ```
 
 ---
 
-## 6. Running the app
+## 7. Running the app
 
 ```bash
 cd ~/lips-poc
-source .venv/bin/activate   # if using a venv
-python main.py
+conda activate venv_poc
+streamlit run main.py
 ```
 
-Gradio will print a local URL (e.g. `http://127.0.0.1:7860`). Open it in your Windows browser — WSL networking is bridged automatically.
+Streamlit will print a local URL (e.g. `http://localhost:8501`). Open it in your Windows browser — WSL networking is bridged automatically.
 
 ---
 
-## 7. Project structure
+## 8. Project structure
 
 ```
 lips-poc/
-├── main.py                  # Gradio UI and event handlers
-├── requirements.txt
-├── scoreboard.json          # Created automatically on first evaluation
+├── main.py                      # Streamlit UI and event handlers
+├── evaluation_runner.py         # Model download, loading, and LIPS evaluation logic
+├── dataset_registry.json        # Maps HF dataset IDs to local benchmark paths/configs
+├── requirements.txt             # App-level Python dependencies
+├── scoreboard.json              # Auto-created on first evaluation; stores all results
+├── configurations/
+│   └── powergrid/
+│       ├── benchmarks/
+│       │   └── l2rpn_case14_sandbox.ini   # LIPS benchmark config
+│       └── simulators/
+│           ├── torch_fc.ini               # Simulator config for torch_fc models
+│           ├── tf_fc.ini                  # Simulator config for tf_fc models
+│           └── tf_leapnet.ini             # Simulator config for tf_leapnet models
+├── datasets/
+│   └── powergrid/
+│       └── l2rpn_case14_sandbox/          # LIPS reference data (downloaded separately)
+├── models/                                # Auto-populated by evaluation_runner on first run
 └── lips_poc/
     ├── __init__.py
-    ├── config.py            # HuggingFace org/repo IDs
-    ├── data_hub.py          # HuggingFace dataset search
-    ├── model_hub.py         # HuggingFace model search
-    └── scoreboard.py        # LIPS evaluation logic and leaderboard I/O
+    ├── data_hub.py                        # HuggingFace dataset search
+    ├── model_hub.py                       # HuggingFace model search
+    └── scoreboard.py                      # Legacy scoring helpers (superseded by evaluation_runner)
 ```
