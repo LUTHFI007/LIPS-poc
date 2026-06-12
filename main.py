@@ -6,19 +6,26 @@ import pandas as pd
 import streamlit as st
 
 from lips_poc.data_hub import search_datasets
-from lips_poc.model_hub import search_models
+from lips_poc.model_hub import search_models, validate_upload_inputs, upload_model
 from evaluation_runner import run_evaluation, extract_scores
 
 _ROOT = Path(__file__).parent
 
-_SB_COLS = [
-    "Model", "Dataset", "Benchmark",
-    "MSE", "MAE", "MAPE_90",
-    "MSE (ood)", "MAE (ood)", "MAPE_90 (ood)",
-    "Physics Viol. %", "Timestamp",
-]
+_SB_BASE_COLS = ["Model", "Dataset", "Benchmark", "Physics Viol. %", "Timestamp"]
 
 SCOREBOARD_FILE = _ROOT / "scoreboard.json"
+_DOCS_DIR = _ROOT / "docs"
+
+# The exact benchmark config the scoreboard evaluates against (see
+# lips_poc/scoreboard.py). Served for download so users train against a
+# byte-identical file — never copied/edited, so train-time == eval-time.
+_BENCH_CONFIG_PATH = _ROOT / "configurations/powergrid/benchmarks/benchmark.ini"
+
+
+def _doc_bytes(filename: str) -> bytes:
+    """Read a file from docs/ as bytes for st.download_button. Passing bytes
+    (not an open handle) makes browsers honour the exact download file_name."""
+    return (_DOCS_DIR / filename).read_bytes()
 
 with (_ROOT / "dataset_registry.json").open() as f:
     DATASET_REGISTRY = json.load(f)
@@ -38,9 +45,11 @@ def _load_scoreboard() -> pd.DataFrame:
     try:
         with SCOREBOARD_FILE.open() as f:
             rows = json.load(f)
-        return pd.DataFrame(rows, columns=_SB_COLS)
+        if not rows:
+            return pd.DataFrame(columns=_SB_BASE_COLS)
+        return pd.DataFrame(rows)
     except FileNotFoundError:
-        return pd.DataFrame(columns=_SB_COLS)
+        return pd.DataFrame(columns=_SB_BASE_COLS)
 
 
 def _save_scoreboard(df: pd.DataFrame) -> None:
@@ -106,6 +115,158 @@ with tab_model:
         if selected_m_rows:
             st.session_state.selected_model = m_df.iloc[selected_m_rows[0]]["Model ID"]
             st.success(f"Selected: **{st.session_state.selected_model}**")
+
+    st.divider()
+    st.subheader("Build Your Own Model")
+
+    with st.expander("How to build and submit a model — read the instructions carefully!"):
+        st.markdown("""
+        ### Step-by-step
+
+        **Step 1 — Download the template for your framework**
+        Use the buttons below. The template is a Python file with one class you
+        fill in. Everything else (data loading, preprocessing, training loop,
+        save/restore) is handled by LIPS automatically.
+
+        **Step 2 — Fill in `build_model()`**
+        Open the template and replace the example architecture in `build_model()`
+        with your own. Read the comments — they explain exactly what variables are
+        available and what you must assign.
+
+        **Step 3 — Download and adjust the `.ini` config**
+        The `.ini` file controls your model's hyperparameters (layer sizes, learning
+        rate, etc.). Download the one for your framework below, rename it (any name
+        except `benchmark.ini`), and update the values to match what
+        you put in `build_model()`.
+
+        **Step 3b — Download the benchmark config**
+        Also download `benchmark.ini` (button below). This is the fixed
+        benchmark every model is scored against. Point `BENCH_CONFIG` in the template
+        at it and train against it **as-is** — do not edit or rename it. It is *not*
+        part of your ZIP; it stays on your machine for training only. Training against
+        a different benchmark config produces invalid scores.
+
+        **Step 4 — Train your model**
+        Run the training script at the bottom of the template file:
+        ```
+        python augmented_simulator.py
+        ```
+        After training, LIPS saves your model into a folder. That folder will contain:
+        `model.weights.h5`, `config.json`, `scaler_params.json`, `losses.json`,
+        `metadata.json`.
+
+        **Step 5 — Assemble the ZIP**
+        Copy two files into your saved model folder:
+        - `augmented_simulator.py` (your filled-in template)
+        - `simulator.ini` (your adjusted config file)
+
+        Then ZIP the entire folder. Your ZIP must look exactly like this:
+        """)
+
+        st.code("""
+your-model-name.zip
+├── model.weights.h5          ← from sim.save()
+├── config.json               ← from sim.save()
+├── scaler_params.json        ← from sim.save()
+├── losses.json               ← from sim.save()
+├── metadata.json             ← from sim.save()
+├── simulator.ini          ← you provide (downloaded and adjusted below)
+└── augmented_simulator.py ← you provide (downloaded and filled in below)
+        """)
+
+        st.markdown("""
+        **Step 6 — Upload**
+        Use the upload form below. Select `custom_tf` or `custom_torch` as the
+        model type. The system validates your ZIP before uploading.
+        """)
+
+    col_tf, col_torch = st.columns(2)
+
+    with col_tf:
+        st.markdown("**TensorFlow**")
+        st.download_button(
+            "Download TF template",
+            data=_doc_bytes("custom_model_template.py"),
+            file_name="augmented_simulator.py",
+            mime="application/octet-stream",
+        )
+        st.download_button(
+            "Download TF simulator config",
+            data=_doc_bytes("tf_fc.ini"),
+            file_name="simulator.ini",
+            mime="application/octet-stream",
+        )
+
+    with col_torch:
+        st.markdown("**PyTorch**")
+        st.download_button(
+            "Download PyTorch template",
+            data=_doc_bytes("custom_model_template_torch.py"),
+            file_name="augmented_simulator.py",
+            mime="application/octet-stream",
+        )
+        st.download_button(
+            "Download PyTorch simulator config",
+            data=_doc_bytes("torch_fc.ini"),
+            file_name="simulator.ini",
+            mime="application/octet-stream",
+        )
+
+    st.markdown("**Benchmark config (required for training — same for both frameworks)**")
+    st.download_button(
+        "Download benchmark config",
+        data=_BENCH_CONFIG_PATH.read_bytes(),
+        file_name="benchmark.ini",
+        mime="application/octet-stream",
+    )
+    st.caption(
+        "Train against this exact file — point `BENCH_CONFIG` in the template at it. "
+        "Do **not** edit or rename it, and do **not** include it in your ZIP. It is the "
+        "fixed config the scoreboard evaluates every model against; a mismatch produces "
+        "invalid scores."
+    )
+
+    st.subheader("Upload Your Model")
+
+    repo_name = st.text_input("Repository name", placeholder="my-model-v1")
+    if repo_name:
+        st.caption(f"Will be uploaded as: `lips-poc/{repo_name}`")
+
+    model_type = st.selectbox(
+        "Model type",
+        ["tf_fc", "tf_leapnet", "torch_fc", "custom_tf", "custom_torch"],
+    )
+
+    if model_type in ("custom_tf", "custom_torch"):
+        framework = "TensorFlow" if model_type == "custom_tf" else "PyTorch"
+        st.info(
+            f"Custom {framework} model. Your ZIP must contain "
+            "`augmented_simulator.py` and a `.ini` config file. "
+            "See the instructions above."
+        )
+
+    description = st.text_area("Description (optional)")
+
+    zip_bytes = None
+    if model_type != "dc_approximation":
+        uploaded = st.file_uploader("Model ZIP", type=["zip"])
+        if uploaded:
+            zip_bytes = uploaded.read()
+
+    errors = validate_upload_inputs(model_type, repo_name, zip_bytes)
+    for err in errors:
+        st.error(err)
+
+    if st.button("Confirm Upload", type="primary", disabled=bool(errors)):
+        with st.spinner("Uploading and validating…"):
+            try:
+                repo_id = upload_model(repo_name, model_type, zip_bytes, description)
+                st.success(f"Uploaded successfully as `{repo_id}`.")
+                st.cache_data.clear()
+                st.session_state.selected_model = repo_id
+                st.rerun()
+            except Exception as e:
+                st.error(f"Upload failed: {e}")
 
 # ── Scoreboard ────────────────────────────────────────────────────────────────
 

@@ -62,7 +62,7 @@ def _run_lips_benchmark(model_path: str) -> tuple[float, float]:
     from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
 
     _ROOT = Path(__file__).parent.parent
-    BENCH_CONFIG_PATH = str(_ROOT / "configurations/powergrid/benchmarks/l2rpn_case14_sandbox.ini")
+    BENCH_CONFIG_PATH = str(_ROOT / "configurations/powergrid/benchmarks/benchmark.ini")
     SIM_CONFIG_PATH   = str(_ROOT / "configurations/powergrid/simulators/torch_fc.ini")
     BENCHMARK_PATH    = str(_ROOT / "datasets/powergrid/l2rpn_case14_sandbox")
 

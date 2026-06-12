@@ -2,6 +2,6 @@
   "PowerGrid-Benchmark1": {
     "benchmark_name": "Benchmark1",
     "dataset_root": "/home/luthfi/lips-poc/datasets/powergrid/l2rpn_case14_sandbox",
-    "config_path": "/home/luthfi/lips-poc/configurations/powergrid/benchmarks/l2rpn_case14_sandbox.ini"
+    "config_path": "/home/luthfi/lips-poc/configurations/powergrid/benchmarks/benchmark.ini"
   }
 }

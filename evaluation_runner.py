@@ -61,6 +61,33 @@ def _download_model(repo_id: str) -> tuple[str, str]:
     return str(_MODELS_DIR), str(lips_dir)
 
 
+def _load_custom_class(model_files_path, base_cls):
+    """Load augmented_simulator.py from the model folder and return the
+    class inside it that subclasses base_cls. Raises ValueError if the file or
+    a matching subclass is missing."""
+    import importlib.util
+    import inspect
+
+    loader_path = model_files_path / "augmented_simulator.py"
+    if not loader_path.exists():
+        raise ValueError(
+            "Custom model type requires augmented_simulator.py in the model "
+            "folder. See docs/custom_model_template.py for the required format."
+        )
+
+    spec = importlib.util.spec_from_file_location("augmented_simulator", str(loader_path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for _, obj in inspect.getmembers(mod, inspect.isclass):
+        if issubclass(obj, base_cls) and obj is not base_cls:
+            return obj
+
+    raise ValueError(
+        f"augmented_simulator.py must define a subclass of {base_cls.__name__}."
+    )
+
+
 def _load_simulator(model_type: str, restore_base: str, model_files: str, dataset_info: dict):
     restore_base_path = pathlib.Path(restore_base)
     model_files_path  = pathlib.Path(model_files)
@@ -158,6 +185,37 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
             log_path=None,
         )
 
+    elif model_type == "custom_tf":
+        # The user's ZIP includes augmented_simulator.py defining a subclass
+        # of TfFullyConnectedPowerGrid. Load it, find that subclass, and
+        # instantiate it. restore() is called by the shared line below.
+        from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import TfFullyConnectedPowerGrid
+
+        custom_cls = _load_custom_class(model_files_path, TfFullyConnectedPowerGrid)
+        sim = custom_cls(
+            name=lips_name,
+            sim_config_path=sim_config_path,
+            bench_config_path=dataset_info["config_path"],
+            bench_config_name=dataset_info["benchmark_name"],
+            log_path=None,
+        )
+
+    elif model_type == "custom_torch":
+        # The user's ZIP includes augmented_simulator.py defining a subclass
+        # of TorchFullyConnected (the model). Wrap it in a TorchSimulator.
+        from lips.augmented_simulators.torch_simulator import TorchSimulator
+        from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
+
+        custom_cls = _load_custom_class(model_files_path, TorchFullyConnected)
+        sim = TorchSimulator(
+            model=custom_cls,
+            sim_config_path=sim_config_path,
+            name=lips_name,
+            bench_config_path=dataset_info["config_path"],
+            bench_config_name=dataset_info["benchmark_name"],
+            log_path=None,
+        )
+
     else:
         raise ValueError(f"Unknown model type: '{model_type}'")
 
@@ -184,7 +242,7 @@ def run_evaluation(
     )
 
     # _topo_vect_transformer is set only during training and never persisted.
-    if model_type == "tf_fc":
+    if model_type in ("tf_fc", "custom_tf"):
         # process_dataset(training=True) safely sets the transformer for fc models.
         simulator.process_dataset(benchmark._test_dataset, training=True)
     elif model_type == "tf_leapnet":
@@ -209,10 +267,8 @@ def run_evaluation(
     return all_results
 
 
-def _avg_metric(split_results: dict, metric_key: str) -> Optional[float]:
-    values = split_results.get("ML", {}).get(metric_key, {})
-    nums = [v for v in values.values() if isinstance(v, (int, float))]
-    return round(sum(nums) / len(nums), 4) if nums else None
+def _get_metric(split_results: dict, metric_key: str) -> dict:
+    return split_results.get("ML", {}).get(metric_key, {})
 
 
 def _physics_violation_pct(split_results: dict) -> Optional[float]:
@@ -229,15 +285,21 @@ def _physics_violation_pct(split_results: dict) -> Optional[float]:
     return round(sum(pcts) / len(pcts), 2) if pcts else None
 
 
+def _flatten_metric(values: dict, label: str, out: dict) -> None:
+    for var, val in values.items():
+        if isinstance(val, (int, float)):
+            out[f"{label} ({var})"] = round(val, 4)
+
+
 def extract_scores(results: dict) -> dict:
     test = results.get("test", {})
     ood  = results.get("test_ood_topo", {})
-    return {
-        "MSE":             _avg_metric(test, "MSE_avg"),
-        "MAE":             _avg_metric(test, "MAE_avg"),
-        "MAPE_90":         _avg_metric(test, "MAPE_90_avg"),
-        "MSE (ood)":       _avg_metric(ood,  "MSE_avg"),
-        "MAE (ood)":       _avg_metric(ood,  "MAE_avg"),
-        "MAPE_90 (ood)":   _avg_metric(ood,  "MAPE_90_avg"),
-        "Physics Viol. %": _physics_violation_pct(test),
-    }
+    scores: dict = {}
+    _flatten_metric(_get_metric(test, "MSE_avg"),    "MSE",         scores)
+    _flatten_metric(_get_metric(test, "MAE_avg"),    "MAE",         scores)
+    _flatten_metric(_get_metric(test, "MAPE_90_avg"),"MAPE_90",     scores)
+    _flatten_metric(_get_metric(ood,  "MSE_avg"),    "MSE_ood",     scores)
+    _flatten_metric(_get_metric(ood,  "MAE_avg"),    "MAE_ood",     scores)
+    _flatten_metric(_get_metric(ood,  "MAPE_90_avg"),"MAPE_90_ood", scores)
+    scores["Physics Viol. %"] = _physics_violation_pct(test)
+    return scores
