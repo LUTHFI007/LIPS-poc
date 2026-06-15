@@ -123,6 +123,37 @@ with tab_model:
         st.markdown("""
         ### Step-by-step
 
+        **Step 0 — Set up your environment (install LIPS)**
+        You train your model locally against the real LIPS library, so install it
+        first. LIPS needs **Python ≥ 3.6** (3.10 recommended). Create an isolated
+        environment, then install LIPS and its dependencies from source — the same
+        steps as the [LIPS repo](https://github.com/IRT-SystemX/LIPS):
+
+        Create and activate a conda env (recommended):
+        ```
+        conda create -n venv_lips python=3.10
+        conda activate venv_lips
+        ```
+        *Or* use a plain virtualenv instead:
+        ```
+        pip3 install -U virtualenv
+        python3 -m virtualenv venv_lips
+        source venv_lips/bin/activate
+        ```
+        Then install LIPS. From PyPI:
+        ```
+        pip install "lips-benchmark[recommended]"
+        ```
+        *Or* from source (use `-e` for an editable checkout you can modify):
+        ```
+        git clone https://github.com/IRT-SystemX/LIPS.git
+        cd LIPS
+        pip3 install -U .[recommended]   # or:  pip3 install -e .[recommended]
+        ```
+        The `[recommended]` extra pulls in TensorFlow, PyTorch, Grid2Op and the
+        other dependencies the templates need. Run all the steps below from inside
+        this activated environment.
+
         **Step 1 — Download the template for your framework**
         Use the buttons below. The template is a Python file with one class you
         fill in. Everything else (data loading, preprocessing, training loop,
@@ -151,25 +182,39 @@ with tab_model:
         ```
         python augmented_simulator.py
         ```
-        After training, LIPS saves your model into a folder. That folder will contain:
-        `model.weights.h5`, `config.json`, `scaler_params.json`, `losses.json`,
-        `metadata.json`.
+        After training, LIPS saves your model into a folder. The exact files depend
+        on the framework (TensorFlow vs PyTorch). `config.json` and `losses.json` are
+        always written; `scaler_params.json` appears only if you trained with a scaler
+        (optional). The weights filename and `metadata.json` differ by framework — see
+        the two layouts below. ZIP whatever files the folder actually contains.
 
         **Step 5 — Assemble the ZIP**
         Copy two files into your saved model folder:
         - `augmented_simulator.py` (your filled-in template)
         - `simulator.ini` (your adjusted config file)
 
-        Then ZIP the entire folder. Your ZIP must look exactly like this:
+        Then ZIP the entire folder. Match the layout for your framework:
         """)
 
+        st.markdown("**TensorFlow** (`custom_tf`):")
         st.code("""
 your-model-name.zip
-├── model.weights.h5          ← from sim.save()
+├── weights.h5                ← from sim.save()
 ├── config.json               ← from sim.save()
-├── scaler_params.json        ← from sim.save()
+├── losses.json               ← from sim.save()
+├── scaler_params.json        ← from sim.save() (only if you used a scaler — optional)
+├── simulator.ini          ← you provide (downloaded and adjusted below)
+└── augmented_simulator.py ← you provide (downloaded and filled in below)
+        """)
+
+        st.markdown("**PyTorch** (`custom_torch`):")
+        st.code("""
+your-model-name.zip
+├── model_last.pt             ← from sim.save()  (weights — note: .pt, not .h5)
+├── config.json               ← from sim.save()
 ├── losses.json               ← from sim.save()
 ├── metadata.json             ← from sim.save()
+├── scaler_params.json        ← from sim.save() (only if you used a scaler — optional)
 ├── simulator.ini          ← you provide (downloaded and adjusted below)
 └── augmented_simulator.py ← you provide (downloaded and filled in below)
         """)
@@ -253,15 +298,23 @@ your-model-name.zip
         if uploaded:
             zip_bytes = uploaded.read()
 
-    errors = validate_upload_inputs(model_type, repo_name, zip_bytes)
-    for err in errors:
-        st.error(err)
+    # On the rerun that follows a successful upload, show the success message and
+    # skip validation for this render. Otherwise the just-created repo would be
+    # re-detected by validate_upload_inputs and falsely reported as "already exists".
+    just_uploaded = st.session_state.pop("upload_success", None)
+    if just_uploaded:
+        st.success(f"Uploaded successfully as `{just_uploaded}`.")
+        errors = []
+    else:
+        errors = validate_upload_inputs(model_type, repo_name, zip_bytes)
+        for err in errors:
+            st.error(err)
 
     if st.button("Confirm Upload", type="primary", disabled=bool(errors)):
         with st.spinner("Uploading and validating…"):
             try:
                 repo_id = upload_model(repo_name, model_type, zip_bytes, description)
-                st.success(f"Uploaded successfully as `{repo_id}`.")
+                st.session_state.upload_success = repo_id
                 st.cache_data.clear()
                 st.session_state.selected_model = repo_id
                 st.rerun()
@@ -274,7 +327,7 @@ with tab_scoreboard:
     st.subheader("Scoreboard")
 
     sel_ds = st.session_state.get("selected_dataset")
-    sel_m  = (st.session_state.get("selected_model") or "").removesuffix("_DEFAULT") or None
+    sel_m  = st.session_state.get("selected_model") or None
 
     col1, col2 = st.columns(2)
     col1.metric("Selected Dataset", sel_ds or "None")

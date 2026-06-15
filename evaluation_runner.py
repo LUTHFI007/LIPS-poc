@@ -38,6 +38,30 @@ def _resolve_model_type(repo_id: str) -> str:
     )
 
 
+def _flatten_single_subdir(lips_dir: pathlib.Path) -> None:
+    """If the model payload was uploaded inside a single nested subfolder
+    (common when a folder is zipped as-is, e.g. model_1.zip -> model_1/...),
+    move those files up to lips_dir so LIPS restore() and the loader find them
+    at the top level. No-op if a config (.ini) is already at the top level."""
+    import shutil
+
+    if any(lips_dir.glob("*.ini")):
+        return
+    subdirs = [d for d in lips_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    nested = [d for d in subdirs if any(d.glob("*.ini"))]
+    if len(nested) != 1:
+        return
+    src_dir = nested[0]
+    for item in src_dir.iterdir():
+        dest = lips_dir / item.name
+        if not dest.exists():
+            shutil.move(str(item), str(dest))
+    try:
+        src_dir.rmdir()
+    except OSError:
+        pass
+
+
 def _download_model(repo_id: str) -> tuple[str, str]:
     """
     Download model files into models/{repo_slug}_DEFAULT/.
@@ -51,6 +75,9 @@ def _download_model(repo_id: str) -> tuple[str, str]:
     if not lips_dir.exists():
         lips_dir.mkdir(parents=True, exist_ok=True)
         snapshot_download(repo_id=repo_id, local_dir=str(lips_dir))
+
+    # Flatten a single nested upload folder so the files sit directly in lips_dir.
+    _flatten_single_subdir(lips_dir)
 
     # LIPS looks for weights.h5 but HF stores it as model.weights.h5
     src = lips_dir / "model.weights.h5"
