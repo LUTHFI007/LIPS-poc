@@ -20,7 +20,7 @@ env/
 # OS
 .DS_Store
 
-PLAN_model_upload.md
-upload_build_plan.md
 test_models/
 docs/HOW_TO_UPLOAD_YOUR_MODEL.md
+docs/scoring.md
+models/

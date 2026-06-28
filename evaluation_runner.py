@@ -115,6 +115,18 @@ def _load_custom_class(model_files_path, base_cls):
     )
 
 
+def _scaler_kwarg(model_files_path) -> dict:
+    """Auto-detect normalization for custom uploads. A model trained WITH a scaler
+    ships scaler_params.json; pass StandardScaler so restore() loads those params and
+    predict() de-normalizes the outputs. A model trained without one ships no such
+    file, so return {} and leave the simulator unscaled (scaler=None) — matching how
+    it was trained. StandardScaler is the LIPS default the FC-derived templates use."""
+    if (model_files_path / "scaler_params.json").exists():
+        from lips.dataset.scaler import StandardScaler
+        return {"scaler": StandardScaler}
+    return {}
+
+
 def _load_simulator(model_type: str, restore_base: str, model_files: str, dataset_info: dict):
     restore_base_path = pathlib.Path(restore_base)
     model_files_path  = pathlib.Path(model_files)
@@ -123,8 +135,24 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
         from lips.physical_simulator.dcApproximationAS import DCApproximationAS
         return DCApproximationAS(name="dc_approximation")
 
+    # The model folder may bundle several .ini files: the benchmark config, the
+    # grid/env config (e.g. l2rpn_case14_sandbox.ini) and the simulator config.
+    # Pick the simulator config: skip the benchmark config, and skip any grid/env
+    # config (identifiable by its "env_name" option, which model configs never
+    # have). glob order is filesystem-dependent, so filtering by content — not
+    # position — is what makes this deterministic.
     bench_ini_name = pathlib.Path(dataset_info["config_path"]).name
-    sim_ini_files  = [f for f in model_files_path.glob("*.ini") if f.name != bench_ini_name]
+
+    def _is_env_config(ini_path: pathlib.Path) -> bool:
+        try:
+            return "env_name" in ini_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+
+    sim_ini_files = [
+        f for f in sorted(model_files_path.glob("*.ini"))
+        if f.name != bench_ini_name and not _is_env_config(f)
+    ]
     if not sim_ini_files:
         raise ValueError(f"No simulator .ini config found in {model_files_path}")
     sim_config_path = str(sim_ini_files[0])
@@ -134,79 +162,53 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
     lips_name = model_files_path.name.removesuffix("_DEFAULT")
 
     if model_type in ("tf_fc", "tf_leapnet"):
-        import re
-        import h5py
         import tensorflow as tf
-        from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import TfFullyConnectedPowerGrid
+        # tf_fc must use the GENERIC TfFullyConnected — the same class the notebook
+        # trained/restored with. The powergrid subclass (TfFullyConnectedPowerGrid)
+        # injects an extra topo-vector transformation into the inputs, so restoring
+        # these weights into it feeds the network a different encoding than it was
+        # trained on and predictions degrade badly.
+        from lips.augmented_simulators.tensorflow_models import TfFullyConnected
         from lips.augmented_simulators.tensorflow_models.powergrid.leap_net import LeapNet
+        # The models were trained WITH a scaler (see notebook): inputs/outputs are
+        # normalized for training and de-normalized on predict. The fitted params
+        # live in scaler_params.json. Without passing the scaler class here,
+        # self.scaler is None and LIPS silently skips load/transform/inverse —
+        # predictions stay in normalized space and metrics blow up.
+        from lips.dataset.scaler import StandardScaler
+        from lips.dataset.scaler.powergrid_scaler import PowerGridScaler
 
-        base_cls = TfFullyConnectedPowerGrid if model_type == "tf_fc" else LeapNet
-
-        _mtype = model_type  # capture for use inside the class
+        base_cls   = TfFullyConnected if model_type == "tf_fc" else LeapNet
+        scaler_cls = StandardScaler   if model_type == "tf_fc" else PowerGridScaler
 
         class _SimWrapper(base_cls):
-            def _post_process(self, dataset, predictions):
-                if _mtype != "tf_leapnet":
-                    return super()._post_process(dataset, predictions)
-                # LeapNet's Keras model returns a list of arrays (one per attr_y).
-                # Convert to the {attr_name: array} dict the evaluator expects.
-                if self.scaler is not None:
-                    predictions = self.scaler.inverse_transform(predictions)
-                if isinstance(predictions, list):
-                    return dict(zip(self._leap_net_model.attr_y, predictions))
-                return dataset.reconstruct_output(predictions)
-
             def _load_model(self, path):
+                # On the Keras 2.8 / TF 2.8 env, weights.h5 is a native Keras 2
+                # HDF5 file, so LIPS' standard load_weights restores it directly.
                 tf.keras.backend.clear_session()
-
-                if _mtype != "tf_fc":
-                    # LeapNet uses ProxyLeapNet.load_data — no Keras load_weights involved
-                    super()._load_model(path)
-                    return
-
-                # tf_fc: Keras 3 legacy loader misreads the .weights.h5 format.
-                # Load weights directly from h5py by index to bypass it.
-                path = pathlib.Path(path)
-                weights_file = path / "model.weights.h5"
-                if not weights_file.exists():
-                    weights_file = path / "weights.h5"
-                if not weights_file.exists():
-                    raise FileNotFoundError(f"No weights file found in {path}")
-
-                self.build_model()
-
-                def _layer_sort_key(name):
-                    m = re.search(r'_(\d+)$', name)
-                    return int(m.group(1)) if m else -1
-
-                with h5py.File(str(weights_file), 'r') as f:
-                    if 'layers' not in f:
-                        raise ValueError(f"Unrecognised weights format in {weights_file}")
-                    saved_keys = sorted(
-                        [k for k in f['layers'] if len(f['layers'][k].get('vars', {})) > 0],
-                        key=_layer_sort_key,
-                    )
-                    model_layers = [l for l in self._model.layers if l.weights]
-                    for layer, key in zip(model_layers, saved_keys):
-                        g = f['layers'][key]['vars']
-                        layer.set_weights([g[str(i)][:] for i in range(len(g))])
+                super()._load_model(path)
 
         sim = _SimWrapper(
             name=lips_name,
             sim_config_path=sim_config_path,
             bench_config_path=dataset_info["config_path"],
             bench_config_name=dataset_info["benchmark_name"],
+            scaler=scaler_cls,
             log_path=None,
         )
 
     elif model_type == "torch_fc":
         from lips.augmented_simulators.torch_simulator import TorchSimulator
         from lips.augmented_simulators.torch_models.fully_connected import TorchFullyConnected
+        # Trained with StandardScaler (see notebook) — pass it so restore loads
+        # scaler_params.json and predict de-normalizes the outputs.
+        from lips.dataset.scaler import StandardScaler
 
         sim = TorchSimulator(
             model=TorchFullyConnected,
             sim_config_path=sim_config_path,
             name=lips_name,
+            scaler=StandardScaler,
             bench_config_path=dataset_info["config_path"],
             bench_config_name=dataset_info["benchmark_name"],
             log_path=None,
@@ -219,13 +221,15 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
         from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import TfFullyConnectedPowerGrid
 
         custom_cls = _load_custom_class(model_files_path, TfFullyConnectedPowerGrid)
-        sim = custom_cls(
+        custom_kwargs = dict(
             name=lips_name,
             sim_config_path=sim_config_path,
             bench_config_path=dataset_info["config_path"],
             bench_config_name=dataset_info["benchmark_name"],
             log_path=None,
         )
+        custom_kwargs.update(_scaler_kwarg(model_files_path))
+        sim = custom_cls(**custom_kwargs)
 
     elif model_type == "custom_torch":
         # The user's ZIP includes augmented_simulator.py defining a subclass
@@ -241,6 +245,7 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
             bench_config_path=dataset_info["config_path"],
             bench_config_name=dataset_info["benchmark_name"],
             log_path=None,
+            **_scaler_kwarg(model_files_path),
         )
 
     else:
@@ -269,13 +274,13 @@ def run_evaluation(
     )
 
     # _topo_vect_transformer is set only during training and never persisted.
-    if model_type in ("tf_fc", "custom_tf"):
+    # The generic tf_fc model has no topo transformer, so it needs nothing here.
+    if model_type == "custom_tf":
         # process_dataset(training=True) safely sets the transformer for fc models.
         simulator.process_dataset(benchmark._test_dataset, training=True)
     elif model_type == "tf_leapnet":
-        # For LeapNet, process_dataset(training=True) also calls
-        # _leap_net_model.init() which corrupts the loaded weights.
-        # Set the transformer directly instead.
+        # Set the transformer directly rather than via process_dataset(training=True),
+        # which would also call _leap_net_model.init() and corrupt the loaded weights.
         from lips.augmented_simulators.tensorflow_models.powergrid.utils import TopoVectTransformation
         simulator._topo_vect_transformer = TopoVectTransformation(
             simulator.bench_config, simulator.params, benchmark._test_dataset
