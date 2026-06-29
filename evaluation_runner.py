@@ -6,7 +6,7 @@
 import pathlib
 from typing import Optional
 
-from huggingface_hub import snapshot_download, ModelCard
+from huggingface_hub import snapshot_download, ModelCard, HfApi
 
 _MODELS_DIR = pathlib.Path(__file__).parent / "models"
 
@@ -62,19 +62,27 @@ def _flatten_single_subdir(lips_dir: pathlib.Path) -> None:
         pass
 
 
-def _download_model(repo_id: str) -> tuple[str, str]:
+def _download_model(repo_id: str, revision: "str | None" = None) -> tuple[str, str, str]:
     """
-    Download model files into models/{repo_slug}_DEFAULT/.
-    LIPS appends _DEFAULT to the name it receives, so we pass repo_slug as the
-    name and LIPS constructs repo_slug_DEFAULT — which is exactly the folder.
-    Returns (restore_base_path, model_files_path).
+    Download a specific model revision into models/{repo_slug}__{sha}_DEFAULT/.
+
+    The exact HF commit SHA is resolved first — even when revision is None
+    (i.e. latest) — and used as the cache key, so a new commit never reuses a
+    stale cache and every evaluation is tied to one concrete commit (the link
+    to the MLflow tracking plane).
+
+    LIPS appends _DEFAULT to the name it receives, so the folder name minus the
+    _DEFAULT suffix becomes the LIPS name; that contract is kept intact.
+    Returns (restore_base_path, model_files_path, hf_revision_sha).
     """
+    sha = HfApi().model_info(repo_id=repo_id, revision=revision).sha
+
     repo_slug = repo_id.replace("/", "--")
-    lips_dir  = _MODELS_DIR / (repo_slug + "_DEFAULT")
+    lips_dir  = _MODELS_DIR / f"{repo_slug}__{sha[:8]}_DEFAULT"
 
     if not lips_dir.exists():
         lips_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_download(repo_id=repo_id, local_dir=str(lips_dir))
+        snapshot_download(repo_id=repo_id, revision=sha, local_dir=str(lips_dir))
 
     # Flatten a single nested upload folder so the files sit directly in lips_dir.
     _flatten_single_subdir(lips_dir)
@@ -85,7 +93,7 @@ def _download_model(repo_id: str) -> tuple[str, str]:
     if src.exists() and not dst.exists():
         dst.symlink_to(src)
 
-    return str(_MODELS_DIR), str(lips_dir)
+    return str(_MODELS_DIR), str(lips_dir), sha
 
 
 def _load_custom_class(model_files_path, base_cls):
@@ -255,15 +263,31 @@ def _load_simulator(model_type: str, restore_base: str, model_files: str, datase
     return sim
 
 
+def _read_model_config(model_files: str) -> dict:
+    """Read the model's config.json (its hyperparameters) from the downloaded
+    folder so they can be logged as MLflow params. Returns {} if absent."""
+    import json
+    cfg_path = pathlib.Path(model_files) / "config.json"
+    if not cfg_path.exists():
+        return {}
+    try:
+        with cfg_path.open() as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def run_evaluation(
     dataset_info: dict,
     model_repo_id: str,
     eval_splits: tuple = ("test", "test_ood_topo"),
-) -> dict:
+    revision: "str | None" = None,
+) -> "tuple[dict, str, dict]":
     from lips.benchmark.powergridBenchmark import PowerGridBenchmark
 
     model_type   = _resolve_model_type(model_repo_id)
-    restore_base, model_files = _download_model(model_repo_id)
+    restore_base, model_files, hf_revision = _download_model(model_repo_id, revision)
+    model_config = _read_model_config(model_files)
     simulator    = _load_simulator(model_type, restore_base, model_files, dataset_info)
 
     benchmark = PowerGridBenchmark(
@@ -296,7 +320,7 @@ def run_evaluation(
         )
         all_results.update(res)
 
-    return all_results
+    return all_results, hf_revision, model_config
 
 
 def _get_metric(split_results: dict, metric_key: str) -> dict:

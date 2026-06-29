@@ -1,8 +1,94 @@
 import pathlib
+import re
 
 from huggingface_hub import HfApi
 
 _api = HfApi()
+
+# Versions are HF git tags named v0, v1, v2, ... on a model repo.
+_VERSION_RE = re.compile(r"^v(\d+)$")
+
+
+def _version_num(tag_name: str):
+    """Return the integer N for a tag named 'vN', else None."""
+    m = _VERSION_RE.match(tag_name)
+    return int(m.group(1)) if m else None
+
+
+def list_versions(repo_id: str) -> list[dict]:
+    """Read the model's versions from its HF git tags (v0, v1, ...), newest
+    first. Each entry: {version, num, revision (commit SHA)}. Read-only; returns
+    [] if the repo has no version tags or can't be read."""
+    try:
+        refs = HfApi().list_repo_refs(repo_id=repo_id, repo_type="model")
+    except Exception:
+        return []
+
+    versions = []
+    for tag in getattr(refs, "tags", []) or []:
+        num = _version_num(tag.name)
+        if num is None:
+            continue
+        versions.append({
+            "version":  tag.name,
+            "num":      num,
+            "revision": tag.target_commit,
+        })
+    versions.sort(key=lambda v: v["num"], reverse=True)
+    return versions
+
+
+def next_version(repo_id: str) -> str:
+    """The next version tag to assign for a repo: 'v0' if none exist yet,
+    otherwise 'v{max+1}'."""
+    versions = list_versions(repo_id)
+    return "v0" if not versions else f"v{versions[0]['num'] + 1}"
+
+
+def author_from_tags(tags) -> str:
+    """Read the 'author:<name>' value from a model card's tag list. Defaults to
+    'master' when absent — which is exactly the legacy models uploaded before
+    versioning (every new upload/version carries its own author tag)."""
+    for t in (tags or []):
+        if isinstance(t, str) and t.startswith("author:"):
+            return t.split(":", 1)[1] or "master"
+    return "master"
+
+
+def get_version_metadata(repo_id: str, revision: "str | None" = None) -> dict:
+    """Read author + parent_version from the model card at a given revision.
+    Returns {'author': <name, default 'master'>, 'parent_version': <str|None>}.
+    Reads the card at the exact revision so each version reports its own author
+    (legacy models with no author tag fall back to 'master')."""
+    tags = []
+    try:
+        from huggingface_hub import ModelCard, hf_hub_download
+        readme = hf_hub_download(
+            repo_id=repo_id, filename="README.md",
+            revision=revision, repo_type="model",
+        )
+        tags = ModelCard.load(readme).data.tags or []
+    except Exception:
+        try:
+            from huggingface_hub import ModelCard
+            tags = (ModelCard.load(repo_id).data.tags) or []
+        except Exception:
+            tags = []
+
+    parent = next(
+        (t.split(":", 1)[1] for t in tags
+         if isinstance(t, str) and t.startswith("parent_version:")),
+        None,
+    )
+    return {"author": author_from_tags(tags), "parent_version": parent}
+
+
+def version_for_revision(repo_id: str, sha: str) -> "str | None":
+    """Which version tag (if any) points at the given commit SHA."""
+    for v in list_versions(repo_id):
+        if v["revision"] == sha:
+            return v["version"]
+    return None
 
 
 def search_models(keyword: str = "") -> list[dict]:
@@ -26,9 +112,12 @@ _VALID_MODEL_TYPES = {
 }
 
 
-def validate_upload_inputs(model_type: str, repo_name: str, zip_bytes) -> list[str]:
+def validate_upload_inputs(model_type: str, repo_name: str, zip_bytes, new_version: bool = False) -> list[str]:
     """Pure validation of upload inputs. Returns a list of error strings
-    (empty = all clear). Does not write files, create repos, or upload."""
+    (empty = all clear). Does not write files, create repos, or upload.
+
+    `new_version=False` (a brand-new model): the repo must NOT already exist.
+    `new_version=True`  (a new version of an existing model): it MUST exist."""
     import re
     import zipfile
 
@@ -49,10 +138,14 @@ def validate_upload_inputs(model_type: str, repo_name: str, zip_bytes) -> list[s
                 "hyphens, underscores, and dots."
             )
 
-        # 4. repo name must not already exist (best-effort)
+        # 4. repo existence (best-effort): a brand-new model must NOT exist;
+        #    a new version of an existing model MUST exist. repo_exists is
+        #    immediate (list_models lags for freshly created repos).
         try:
-            existing = [m.id for m in HfApi().list_models(author="lips-poc")]
-            if f"lips-poc/{repo_name}" in existing:
+            exists = HfApi().repo_exists(repo_id=f"lips-poc/{repo_name}", repo_type="model")
+            if new_version and not exists:
+                errors.append(f"No model named '{repo_name}' to add a version to.")
+            elif not new_version and exists:
                 errors.append(f"A model named '{repo_name}' already exists in lips-poc.")
         except Exception:
             pass
@@ -84,7 +177,10 @@ def validate_upload_inputs(model_type: str, repo_name: str, zip_bytes) -> list[s
             if not any(n.endswith(".pt") or n.endswith(".model.pt") for n in names):
                 errors.append("ZIP must contain a weights file (.pt).")
 
-        # 10. tf_fc: .h5 must be valid Keras HDF5 with a 'layers' group
+        # 10. tf_fc: the .h5 must be a readable Keras HDF5 weights file. The
+        # evaluator restores native Keras-2 weights.h5 (layer-name groups) just
+        # as well as Keras-3 'layers' files, so accept either — only reject a
+        # file that isn't a valid / non-empty HDF5.
         if model_type == "tf_fc":
             import h5py
 
@@ -92,15 +188,14 @@ def validate_upload_inputs(model_type: str, repo_name: str, zip_bytes) -> list[s
             if h5_names:
                 try:
                     with h5py.File(io.BytesIO(zf.read(h5_names[0])), "r") as f:
-                        if "layers" not in f:
+                        if len(f.keys()) == 0:
                             errors.append(
-                                "The weights file does not appear to be a valid "
-                                "Keras HDF5 file (missing 'layers' group)."
+                                "The weights file is not a valid Keras HDF5 file "
+                                "(empty HDF5)."
                             )
                 except Exception:
                     errors.append(
-                        "The weights file does not appear to be a valid "
-                        "Keras HDF5 file (missing 'layers' group)."
+                        "The weights file is not a valid Keras HDF5 file."
                     )
 
         # 11. at least one .ini
@@ -213,9 +308,11 @@ def upload_model(
     model_type: str,
     zip_bytes: "bytes | None",
     description: str = "",
+    author: str = "master",
 ) -> str:
-    """Validate, create the HF repo, upload ZIP contents + model card, then
-    verify. Returns the repo_id on success. Raises ValueError on any failure."""
+    """Validate, create the HF repo, upload ZIP contents + model card, tag the
+    upload as v0, then verify. Returns the repo_id on success. Raises ValueError
+    on any failure. `author` is stored on the card and is who created v0."""
     import io
     import zipfile
 
@@ -242,7 +339,12 @@ def upload_model(
     from huggingface_hub import ModelCard, ModelCardData
 
     card_data = ModelCardData(
-        tags=[f"lips_model_type:{model_type}", "lips", "powergrid"],
+        tags=[
+            f"lips_model_type:{model_type}",
+            f"author:{author}",
+            "lips",
+            "powergrid",
+        ],
         library_name="lips",
     )
     card_content = f"---\n{card_data.to_yaml()}\n---\n\n{description or ''}"
@@ -259,4 +361,78 @@ def upload_model(
             "The repo has been deleted."
         )
 
+    # The initial upload is Version 0. Tagging the current HEAD (after the card
+    # push) makes v0 point at the complete uploaded model.
+    api.create_tag(repo_id=repo_id, tag="v0", repo_type="model", exist_ok=True)
+
     return repo_id
+
+
+def upload_new_version(
+    repo_name: str,
+    model_type: str,
+    zip_bytes: "bytes | None",
+    description: str = "",
+    author: str = "master",
+    parent_version: "str | None" = None,
+) -> "tuple[str, str]":
+    """Publish a NEW VERSION of an existing model: push the changed files as a
+    new commit on the EXISTING repo, then tag it v{n+1} and record author +
+    parent version on the card. Returns (repo_id, new_version_tag).
+
+    Unlike upload_model, this does NOT create the repo and does NOT delete it on
+    failure (older versions live on as tags and must be preserved). Raises
+    ValueError on any failure."""
+    import io
+    import zipfile
+
+    errors = validate_upload_inputs(model_type, repo_name, zip_bytes, new_version=True)
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    repo_id = f"lips-poc/{repo_name}"
+    api = HfApi()
+
+    new_tag = next_version(repo_id)            # e.g. v0 exists -> v1
+    if parent_version is None:                 # default: builds on the latest version
+        versions = list_versions(repo_id)
+        parent_version = versions[0]["version"] if versions else "v0"
+
+    if model_type != "dc_approximation" and zip_bytes is not None:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for member in zf.namelist():
+                if member.endswith("/"):
+                    continue
+                api.upload_file(
+                    path_or_fileobj=io.BytesIO(zf.read(member)),
+                    path_in_repo=member,
+                    repo_id=repo_id,
+                    repo_type="model",
+                )
+
+    from huggingface_hub import ModelCard, ModelCardData
+
+    card_data = ModelCardData(
+        tags=[
+            f"lips_model_type:{model_type}",
+            f"author:{author}",
+            f"parent_version:{parent_version}",
+            "lips",
+            "powergrid",
+        ],
+        library_name="lips",
+    )
+    card_content = f"---\n{card_data.to_yaml()}\n---\n\n{description or ''}"
+    ModelCard(card_content).push_to_hub(repo_id)
+
+    post_errors = validate_after_upload(repo_id, model_type)
+    if post_errors:
+        raise ValueError(
+            f"New version upload failed its post-upload check: {post_errors}. "
+            f"The repo's existing versions are unaffected; '{new_tag}' was not tagged."
+        )
+
+    # Tag the new commit as the next version (after all files + card are pushed).
+    api.create_tag(repo_id=repo_id, tag=new_tag, repo_type="model", exist_ok=False)
+
+    return repo_id, new_tag

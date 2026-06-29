@@ -23,4 +23,12 @@ env/
 test_models/
 docs/HOW_TO_UPLOAD_YOUR_MODEL.md
 docs/scoring.md
+docs/MLFLOW_PLAN.md
+docs/VERSIONING_NOTE.docx
 models/
+trial/
+
+# MLflow local dev backend (production uses external Postgres on the Space)
+mlflow.db
+mlartifacts/
+mlruns/

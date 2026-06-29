@@ -6,7 +6,11 @@ import pandas as pd
 import streamlit as st
 
 from lips_poc.data_hub import search_datasets
-from lips_poc.model_hub import search_models, validate_upload_inputs, upload_model
+from lips_poc.model_hub import (
+    search_models, validate_upload_inputs, upload_model, upload_new_version,
+    list_versions, next_version, get_version_metadata, version_for_revision,
+)
+from lips_poc import tracking
 from evaluation_runner import run_evaluation, extract_scores
 
 _ROOT = Path(__file__).parent
@@ -41,6 +45,17 @@ def _fetch_models() -> list[dict]:
     return search_models("")
 
 
+@st.cache_data(ttl=300)
+def _fetch_versions(repo_id: str) -> list[dict]:
+    """A model's versions (newest first), enriched with author/parent read from
+    the HF card. Cached so the expandable list stays responsive."""
+    rows = []
+    for v in list_versions(repo_id):
+        meta = get_version_metadata(repo_id, v["version"])
+        rows.append({**v, "author": meta["author"], "parent_version": meta["parent_version"]})
+    return rows
+
+
 def _load_scoreboard() -> pd.DataFrame:
     try:
         with SCOREBOARD_FILE.open() as f:
@@ -59,14 +74,21 @@ def _save_scoreboard(df: pd.DataFrame) -> None:
 
 # Clear stale selections on every new browser session
 if "initialized" not in st.session_state:
-    st.session_state.selected_dataset = None
-    st.session_state.selected_model   = None
-    st.session_state.initialized      = True
+    st.session_state.selected_dataset  = None
+    st.session_state.selected_model    = None
+    st.session_state.selected_version  = None
+    st.session_state.selected_revision = None
+    st.session_state.initialized       = True
 
 # ── Page setup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="LIPS Power Grid Benchmark", layout="wide")
 st.title("LIPS Power Grid Benchmark POC")
+
+# Note: author is no longer a sidebar field. It's a property of the model
+# version — captured at upload (Model Hub) and stored on the HF card — and read
+# back from HF metadata at evaluation time, so every run is attributed to the
+# version's real creator regardless of who clicks Evaluate.
 
 tab_data, tab_model, tab_scoreboard = st.tabs(["Data Hub", "Model Hub", "Scoreboard"])
 
@@ -97,12 +119,25 @@ with tab_data:
 
 with tab_model:
     st.subheader("Model Hub")
-    st.caption("Click a row to select it.")
+    st.caption("Click a model row, then choose its version from the dropdown below.")
     models = _fetch_models()
     if not models:
         st.warning("No models found on HuggingFace (lips-poc org).")
     else:
-        m_df = pd.DataFrame(models)
+        # One row per model, with a Versions column listing its tags.
+        versions_by_repo = {}
+        rows = []
+        for m in models:
+            repo_id = m["Model ID"]
+            versions = _fetch_versions(repo_id)
+            versions_by_repo[repo_id] = versions
+            rows.append({
+                "Model ID":      repo_id,
+                "Versions":      ", ".join(v["version"] for v in reversed(versions)) or "(none)",
+                "Last Modified": m.get("Last Modified", ""),
+                "URL":           m.get("URL", ""),
+            })
+        m_df = pd.DataFrame(rows)
         m_event = st.dataframe(
             m_df,
             use_container_width=True,
@@ -111,10 +146,26 @@ with tab_model:
             selection_mode="single-row",
             key="m_table",
         )
-        selected_m_rows = m_event.selection.rows
-        if selected_m_rows:
-            st.session_state.selected_model = m_df.iloc[selected_m_rows[0]]["Model ID"]
-            st.success(f"Selected: **{st.session_state.selected_model}**")
+
+        sel_rows = m_event.selection.rows
+        if sel_rows:
+            repo_id  = m_df.iloc[sel_rows[0]]["Model ID"]
+            versions = versions_by_repo.get(repo_id, [])
+            if not versions:
+                st.warning("This model has no version tags yet.")
+            else:
+                ver_names = [v["version"] for v in versions]  # newest first
+                chosen = st.selectbox("Version", ver_names, key=f"ver::{repo_id}")
+                vinfo = next(v for v in versions if v["version"] == chosen)
+                st.session_state.selected_model    = repo_id
+                st.session_state.selected_version  = chosen
+                st.session_state.selected_revision = vinfo["revision"]
+                detail = f"author `{vinfo['author']}` · commit `{vinfo['revision'][:8]}`"
+                if vinfo["parent_version"]:
+                    detail += f" · parent {vinfo['parent_version']}"
+                st.success(
+                    f"Selected **{repo_id.split('/')[-1]} @ {chosen}** — {detail}"
+                )
 
     st.divider()
     st.subheader("Build Your Own Model")
@@ -273,14 +324,34 @@ your-model-name.zip
 
     st.subheader("Upload Your Model")
 
-    repo_name = st.text_input("Repository name", placeholder="my-model-v1")
-    if repo_name:
-        st.caption(f"Will be uploaded as: `lips-poc/{repo_name}`")
+    upload_mode = st.radio(
+        "Upload mode",
+        ["New model", "New version of existing model"],
+        horizontal=True,
+    )
+    is_new_version = upload_mode == "New version of existing model"
+
+    author = st.text_input("Your username (author)", placeholder="e.g. alice")
+
+    if is_new_version:
+        existing = [m["Model ID"].split("/")[-1] for m in (_fetch_models() or [])]
+        repo_name = st.selectbox("Existing model", existing) if existing else None
+        if repo_name:
+            st.caption(
+                f"Will publish **lips-poc/{repo_name}** as "
+                f"**{next_version(f'lips-poc/{repo_name}')}**."
+            )
+    else:
+        repo_name = st.text_input("Repository name", placeholder="my-model")
+        if repo_name:
+            st.caption(f"Will be uploaded as: `lips-poc/{repo_name}` (Version **v0**)")
 
     model_type = st.selectbox(
         "Model type",
         ["tf_fc", "tf_leapnet", "torch_fc", "custom_tf", "custom_torch"],
     )
+    if is_new_version:
+        st.caption("Use the same model type as the existing model.")
 
     if model_type in ("custom_tf", "custom_torch"):
         framework = "TensorFlow" if model_type == "custom_tf" else "PyTorch"
@@ -306,15 +377,27 @@ your-model-name.zip
         st.success(f"Uploaded successfully as `{just_uploaded}`.")
         errors = []
     else:
-        errors = validate_upload_inputs(model_type, repo_name, zip_bytes)
+        errors = validate_upload_inputs(
+            model_type, repo_name or "", zip_bytes, new_version=is_new_version
+        )
+        if not (author or "").strip():
+            errors.append("Enter your username (author).")
         for err in errors:
             st.error(err)
 
     if st.button("Confirm Upload", type="primary", disabled=bool(errors)):
         with st.spinner("Uploading and validating…"):
             try:
-                repo_id = upload_model(repo_name, model_type, zip_bytes, description)
-                st.session_state.upload_success = repo_id
+                if is_new_version:
+                    repo_id, new_tag = upload_new_version(
+                        repo_name, model_type, zip_bytes, description, author=author,
+                    )
+                    st.session_state.upload_success = f"{repo_id} ({new_tag})"
+                else:
+                    repo_id = upload_model(
+                        repo_name, model_type, zip_bytes, description, author=author,
+                    )
+                    st.session_state.upload_success = repo_id
                 st.cache_data.clear()
                 st.session_state.selected_model = repo_id
                 st.rerun()
@@ -327,11 +410,16 @@ with tab_scoreboard:
     st.subheader("Scoreboard")
 
     sel_ds = st.session_state.get("selected_dataset")
-    sel_m  = st.session_state.get("selected_model") or None
+    sel_m   = st.session_state.get("selected_model") or None
+    sel_ver = st.session_state.get("selected_version")
+    sel_rev = st.session_state.get("selected_revision")
 
     col1, col2 = st.columns(2)
     col1.metric("Selected Dataset", sel_ds or "None")
-    col2.metric("Selected Model",   sel_m  or "None")
+    col2.metric(
+        "Selected Model",
+        f"{sel_m.split('/')[-1]} @ {sel_ver}" if sel_m else "None",
+    )
 
     if st.button("Evaluate", type="primary"):
         if not sel_ds:
@@ -345,9 +433,10 @@ with tab_scoreboard:
             else:
                 with st.spinner("Downloading model and running evaluation — this may take a few minutes…"):
                     try:
-                        results = run_evaluation(
+                        results, hf_revision, model_config = run_evaluation(
                             dataset_info=DATASET_REGISTRY[ds_key],
                             model_repo_id=sel_m,
+                            revision=sel_rev,
                         )
                         scores = extract_scores(results)
                     except Exception as e:
@@ -365,11 +454,44 @@ with tab_scoreboard:
                 df = _load_scoreboard()
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                 _save_scoreboard(df)
+
+                # Tracking plane: log this evaluation to MLflow, linked to the
+                # exact HF commit via hf_revision. version + author + parent come
+                # from the HF version metadata (the card at this commit), so the
+                # run is attributed to whoever created the version — not whoever
+                # clicked Evaluate. Observability only — never blocks the result.
+                meta    = get_version_metadata(sel_m, hf_revision)
+                version = version_for_revision(sel_m, hf_revision)
+                author  = meta["author"]
+                tracking.log_evaluation(
+                    experiment=tracking.experiment_for(new_row["Benchmark"]),
+                    run_name=tracking.make_run_name(new_row["Model"], version or "", author),
+                    params={
+                        "hf_repo_id":     sel_m,
+                        "hf_revision":    hf_revision,
+                        "author":         author,
+                        "version":        version,
+                        "parent_version": meta["parent_version"],
+                        **tracking.flatten_config(model_config),
+                    },
+                    metrics=scores,
+                    tags={"author": author, "version": version, "hf_revision": hf_revision},
+                )
+
                 st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
                 st.rerun()
 
+    # The scoreboard now reads from the MLflow tracking store (the system of
+    # record). Falls back to local scoreboard.json if the store is unreachable.
+    sb_rows = tracking.fetch_leaderboard()
+    if sb_rows:
+        st.caption("Source: MLflow tracking store")
+        sb = pd.DataFrame(sb_rows)
+    else:
+        st.caption("Source: local scoreboard.json (MLflow store unavailable)")
+        sb = _load_scoreboard()
     st.dataframe(
-        _load_scoreboard(),
+        sb,
         use_container_width=True,
         hide_index=True,
     )
