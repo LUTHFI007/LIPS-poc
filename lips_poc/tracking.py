@@ -161,6 +161,7 @@ def fetch_leaderboard(benchmark: "str | None" = None) -> list:
                 rows.append({
                     "Model":     repo.split("/")[-1] if repo else r.data.tags.get("mlflow.runName", ""),
                     "Author":    p.get("author", ""),
+                    "Version":   p.get("version", ""),
                     "Benchmark": bench,
                     **m,
                     "Revision":  (p.get("hf_revision", "") or "")[:8],
