@@ -21,10 +21,7 @@ env/
 .DS_Store
 
 test_models/
-docs/HOW_TO_UPLOAD_YOUR_MODEL.md
-docs/scoring.md
-docs/MLFLOW_PLAN.md
-docs/VERSIONING_NOTE.docx
+files/
 models/
 trial/
 
@@ -32,3 +29,9 @@ trial/
 mlflow.db
 mlartifacts/
 mlruns/
+
+# Auth local dev backend (only used if APP_DB_URI is unset)
+app_users.db
+
+# Local secrets — real values live here, never committed
+.env

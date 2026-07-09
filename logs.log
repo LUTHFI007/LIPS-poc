@@ -1683,3 +1683,30 @@
 2026-06-29 17:23:49 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-tf_fc__e174154a_DEFAULT: 0.06293902799916395
 2026-06-30 11:43:39 - TorchSimulator            - INFO    : Training of {torch_fc_DEFAULT} started
 2026-06-30 11:43:52 - TorchSimulator            - INFO    : Model {torch_fc_DEFAULT} is saved at {/home/luthfi/lips-poc/trial/torch_fc_DEFAULT}
+2026-06-30 14:08:14 - TorchSimulator            - INFO    : Model {lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT} is loaded from {/home/luthfi/lips-poc/models/lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT}
+2026-06-30 14:08:15 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT on test dataset
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 276.07
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 441.90
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 10.41
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 13.87
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 2407214547468288.00
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 3162430322507776.00
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_or: 0.03
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_ex: 0.03
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT: 0.013661683999089291
+2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_or: 5762.153
+2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_ex: 8025.779
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT: 0.010196256000199355
+2026-06-30 14:08:15 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT on test_ood_topo dataset
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 7896.28
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 12955.52
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 43.46
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 59.09
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 23012724682260480.00
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 32794508403933184.00
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_or: 0.16
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_ex: 0.16
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT: 0.010341965000407072
+2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_or: 24348.635
+2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_ex: 36317.703
+2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT: 0.008321530000102939

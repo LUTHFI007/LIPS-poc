@@ -2,6 +2,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+# Load secrets from a local .env (APP_DB_URI, ADMIN_EMAILS, MLFLOW_TRACKING_URI)
+# BEFORE importing our modules, so they see the values at import time. On a
+# deployed Space there is no .env — the platform injects these as real env vars
+# and load_dotenv() is a harmless no-op.
+from dotenv import load_dotenv
+load_dotenv()
+
 import pandas as pd
 import streamlit as st
 
@@ -11,13 +18,16 @@ from lips_poc.model_hub import (
     list_versions, next_version, get_version_metadata, version_for_revision,
 )
 from lips_poc import tracking
+from lips_poc import auth
 from evaluation_runner import run_evaluation, extract_scores
 
 _ROOT = Path(__file__).parent
+_LOGO_PATH = _ROOT / "img" / "Logo.png"
+_MLFLOW_SPACE_URL = "https://huggingface.co/spaces/lips-poc/lips-mlflow"
 
-_SB_BASE_COLS = ["Model", "Dataset", "Benchmark", "Physics Viol. %", "Timestamp"]
-
-SCOREBOARD_FILE = _ROOT / "scoreboard.json"
+# scoreboard.json is retired: the leaderboard now reads and writes solely via the
+# MLflow tracking store (lips_poc/tracking.py). The old file is kept in the repo
+# as a frozen artifact in case we ever want to revive local persistence.
 _DOCS_DIR = _ROOT / "docs"
 
 # The exact benchmark config the scoreboard evaluates against (see
@@ -56,22 +66,6 @@ def _fetch_versions(repo_id: str) -> list[dict]:
     return rows
 
 
-def _load_scoreboard() -> pd.DataFrame:
-    try:
-        with SCOREBOARD_FILE.open() as f:
-            rows = json.load(f)
-        if not rows:
-            return pd.DataFrame(columns=_SB_BASE_COLS)
-        return pd.DataFrame(rows)
-    except FileNotFoundError:
-        return pd.DataFrame(columns=_SB_BASE_COLS)
-
-
-def _save_scoreboard(df: pd.DataFrame) -> None:
-    with SCOREBOARD_FILE.open("w") as f:
-        json.dump(df.to_dict(orient="records"), f, indent=2)
-
-
 # Clear stale selections on every new browser session
 if "initialized" not in st.session_state:
     st.session_state.selected_dataset  = None
@@ -83,14 +77,166 @@ if "initialized" not in st.session_state:
 # ── Page setup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="LIPS Power Grid Benchmark", layout="wide")
-st.title("LIPS Power Grid Benchmark POC")
 
-# Note: author is no longer a sidebar field. It's a property of the model
-# version — captured at upload (Model Hub) and stored on the HF card — and read
-# back from HF metadata at evaluation time, so every run is attributed to the
-# version's real creator regardless of who clicks Evaluate.
 
-tab_data, tab_model, tab_scoreboard = st.tabs(["Data Hub", "Model Hub", "Scoreboard"])
+def _render_logo() -> None:
+    """The System X logo, if present."""
+    if _LOGO_PATH.exists():
+        st.image(str(_LOGO_PATH), width=110)
+
+
+def _status_line(ok: bool, msg: str) -> None:
+    """A live ✓ / ✗ line under a register field, coloured green or red."""
+    icon, colour = ("✅", "green") if ok else ("❌", "red")
+    st.markdown(f":{colour}[{icon} {msg}]")
+
+
+def _scoreboard_selection() -> list:
+    """Indices of the scoreboard rows the admin has checked, read from the
+    st.dataframe selection state (persisted in session_state under 'sb_table').
+    Read at the top of the tab so the Delete button — rendered above the table —
+    reflects the current selection."""
+    state = st.session_state.get("sb_table")
+    if not state:
+        return []
+    sel = state.get("selection") if isinstance(state, dict) else getattr(state, "selection", None)
+    if sel is None:
+        return []
+    rows = sel.get("rows") if isinstance(sel, dict) else getattr(sel, "rows", None)
+    return list(rows or [])
+
+
+def _render_login_form() -> None:
+    """Inline login form shown on the page for logged-out visitors (Register
+    stays a modal in the header). On success, signs in and reruns."""
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        found = auth.authenticate(email, password)
+        if found:
+            st.session_state.user = found
+            st.rerun()
+        else:
+            st.error("Invalid email or password.")
+
+
+def _render_register_form() -> None:
+    """Inline registration form with live validation, shown on the page when the
+    header's Register toggle is active. Fields are plain inputs (not st.form) so
+    each keystroke reruns and refreshes the ✓/✗ status; the Create button stays
+    disabled until every check passes. auth.register() is still the real guard."""
+
+    # Email — format check, then uniqueness (only query the DB once the format
+    # is valid, so we don't hit Neon on every partial keystroke).
+    r_email = st.text_input("Email", key="reg_email")
+    email_ok = False
+    if r_email:
+        err = auth.email_format_error(r_email)
+        if err:
+            _status_line(False, err)
+        elif auth.email_taken(r_email):
+            _status_line(False, "This email is already registered.")
+        else:
+            _status_line(True, "Email available.")
+            email_ok = True
+
+    # Username — same pattern, with the rules shown up front.
+    r_username = st.text_input("Username", key="reg_username")
+    st.caption(f"Allowed: {auth.USERNAME_RULE_TEXT}")
+    username_ok = False
+    if r_username:
+        err = auth.username_format_error(r_username)
+        if err:
+            _status_line(False, err)
+        elif auth.username_taken(r_username):
+            _status_line(False, "This username is already taken.")
+        else:
+            _status_line(True, "Username available.")
+            username_ok = True
+
+    # Password — length and match.
+    r_password = st.text_input("Password", type="password", key="reg_pw")
+    r_confirm = st.text_input("Confirm password", type="password", key="reg_pw2")
+    pw_len_ok = len(r_password) >= auth.MIN_PASSWORD_LEN
+    pw_match = bool(r_password) and r_password == r_confirm
+    if r_password:
+        _status_line(pw_len_ok, f"At least {auth.MIN_PASSWORD_LEN} characters.")
+    if r_confirm:
+        _status_line(pw_match, "Passwords match." if pw_match else "Passwords do not match.")
+
+    all_ok = email_ok and username_ok and pw_len_ok and pw_match
+    if st.button("Create account", type="primary", disabled=not all_ok):
+        try:
+            st.session_state.user = auth.register(r_email, r_username, r_password)
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
+
+def _render_header() -> None:
+    """Top header bar shown in every state: logo + title on the left; on the
+    right either a Register button (logged out — login is an inline form on the
+    page) or the signed-in identity + Logout (logged in)."""
+    logo_col, title_col, action_col = st.columns([2, 4, 3], vertical_alignment="center")
+    with logo_col:
+        _render_logo()
+    with title_col:
+        st.markdown("#### LIPS Benchmark System")
+    with action_col:
+        if "user" in st.session_state:
+            u = st.session_state.user
+            badge = " · admin" if u["role"] == "admin" else ""
+            info_col, btn_col = st.columns([3, 1], vertical_alignment="center")
+            info_col.markdown(f"Signed in as **{u['username']}**{badge}")
+            if btn_col.button("Logout"):
+                del st.session_state.user
+                st.rerun()
+        else:
+            # Toggle between the two inline forms: the button always offers the
+            # OTHER view than the one currently shown. A left spacer column pushes
+            # it to the right edge of the header; both use the primary colour.
+            _sp, tgl_col = st.columns([2, 1])
+            if st.session_state.get("auth_view", "login") == "login":
+                if tgl_col.button("Register", type="primary", use_container_width=True):
+                    st.session_state.auth_view = "register"
+                    st.rerun()
+            else:
+                if tgl_col.button("Login", type="primary", use_container_width=True):
+                    st.session_state.auth_view = "login"
+                    st.rerun()
+    st.divider()
+
+
+_render_header()
+
+# ── Auth gate: the tabs only render for signed-in users ───────────────────────
+if "user" not in st.session_state:
+    _left, form_col, _right = st.columns([1, 2, 1])
+    with form_col:
+        if st.session_state.get("auth_view", "login") == "register":
+            st.subheader("Register")
+            st.caption("Already have an account? Click **Login** to access your account.")
+            _render_register_form()
+        else:
+            st.subheader("Login")
+            st.caption("New here? Click **Register** to create an account.")
+            _render_login_form()
+    st.stop()
+
+user = st.session_state.user
+is_admin = user["role"] == "admin"
+
+# Note: author is no longer a free-text field. It's bound to the signed-in user's
+# username (stamped on the HF card at upload) and read back from HF metadata at
+# evaluation time, so every run is attributed to the version's real creator
+# regardless of who clicks Evaluate.
+
+_tab_labels = ["Data Hub", "Model Hub", "Scoreboard"] + (["Admin"] if is_admin else [])
+_tabs = st.tabs(_tab_labels)
+tab_data, tab_model, tab_scoreboard = _tabs[0], _tabs[1], _tabs[2]
+tab_admin = _tabs[3] if is_admin else None
 
 # ── Data Hub ──────────────────────────────────────────────────────────────────
 
@@ -331,7 +477,10 @@ your-model-name.zip
     )
     is_new_version = upload_mode == "New version of existing model"
 
-    author = st.text_input("Your username (author)", placeholder="e.g. alice")
+    # Author is bound to the signed-in user — you can only upload under your own
+    # username, so it is shown read-only, not entered.
+    author = user["username"]
+    st.text_input("Uploading as", value=author, disabled=True)
 
     if is_new_version:
         existing = [m["Model ID"].split("/")[-1] for m in (_fetch_models() or [])]
@@ -380,8 +529,6 @@ your-model-name.zip
         errors = validate_upload_inputs(
             model_type, repo_name or "", zip_bytes, new_version=is_new_version
         )
-        if not (author or "").strip():
-            errors.append("Enter your username (author).")
         for err in errors:
             st.error(err)
 
@@ -421,7 +568,32 @@ with tab_scoreboard:
         f"{sel_m.split('/')[-1]} @ {sel_ver}" if sel_m else "None",
     )
 
-    if st.button("Evaluate", type="primary"):
+    # Fetch the leaderboard once — used by both the delete action (needs run_ids)
+    # and the table below. Each row carries an internal 'run_id'.
+    sb_rows = tracking.fetch_leaderboard()
+    run_ids = [r.get("run_id") for r in sb_rows]
+
+    # Action row: Evaluate on the left; for admins, Delete on the right at the
+    # same level. Delete stays disabled until at least one run is checked.
+    c_eval, _sp, c_del, c_mlflow = st.columns([2, 5, 2, 2], vertical_alignment="center")
+    evaluate_clicked = c_eval.button("Evaluate", type="primary")
+    if is_admin:
+        sel_idx = _scoreboard_selection()
+        del_label = f"🗑 Delete ({len(sel_idx)})" if sel_idx else "🗑 Delete"
+        if c_del.button(del_label, disabled=not sel_idx, use_container_width=True):
+            ids = [run_ids[i] for i in sel_idx if i < len(run_ids) and run_ids[i]]
+            try:
+                n = tracking.hard_delete_runs(ids)
+                st.session_state.pop("sb_table", None)  # clear stale selection
+                st.success(f"Permanently deleted {n} run(s).")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
+        # Opens the hosted MLflow tracking Space (admin only — normal users
+        # never see this button).
+        c_mlflow.link_button("MLFlow", _MLFLOW_SPACE_URL, use_container_width=True)
+
+    if evaluate_clicked:
         if not sel_ds:
             st.error("Please select a dataset in the Data Hub tab first.")
         elif not sel_m:
@@ -451,10 +623,6 @@ with tab_scoreboard:
                     **scores,
                     "Timestamp": datetime.now().isoformat(timespec="seconds"),
                 }
-                df = _load_scoreboard()
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                _save_scoreboard(df)
-
                 # Tracking plane: log this evaluation to MLflow, linked to the
                 # exact HF commit via hf_revision. version + author + parent come
                 # from the HF version metadata (the card at this commit), so the
@@ -481,17 +649,81 @@ with tab_scoreboard:
                 st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
                 st.rerun()
 
-    # The scoreboard now reads from the MLflow tracking store (the system of
-    # record). Falls back to local scoreboard.json if the store is unreachable.
-    sb_rows = tracking.fetch_leaderboard()
+    # The scoreboard reads solely from the MLflow tracking store (the system of
+    # record — Neon Postgres via MLFLOW_TRACKING_URI). sb_rows was fetched above.
     if sb_rows:
-        st.caption("Source: MLflow tracking store")
-        sb = pd.DataFrame(sb_rows)
+        show_df = pd.DataFrame(sb_rows).drop(columns=["run_id"], errors="ignore")
+        if is_admin:
+            st.caption("Check runs on the left, then click **Delete** above to permanently remove them.")
+            st.dataframe(
+                show_df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="sb_table",
+            )
+        else:
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
     else:
-        st.caption("Source: local scoreboard.json (MLflow store unavailable)")
-        sb = _load_scoreboard()
-    st.dataframe(
-        sb,
-        use_container_width=True,
-        hide_index=True,
-    )
+        st.info("No evaluations recorded yet, or the tracking store is unavailable.")
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+if tab_admin is not None:
+    with tab_admin:
+        head_l, head_r = st.columns([4, 1], vertical_alignment="center")
+        head_l.subheader("Users")
+        if head_r.button("Manage Users", use_container_width=True):
+            st.session_state.manage_users = not st.session_state.get("manage_users", False)
+        st.caption("Everyone registered on the platform. Disabled users are kept but cannot sign in.")
+
+        try:
+            users = auth.list_users()
+        except Exception as e:
+            st.error(f"Could not load users: {e}")
+            users = []
+
+        if not users:
+            st.info("No users yet.")
+        else:
+            udf = pd.DataFrame(users)
+            udf["is_active"] = udf["is_active"].astype(bool)
+            udf["Status"] = udf["is_active"].map(lambda a: "Active" if a else "Disabled")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total users", len(udf))
+            m2.metric("Active", int(udf["is_active"].sum()))
+            m3.metric("Disabled", int((~udf["is_active"]).sum()))
+
+            show = udf[["username", "email", "role", "Status", "created_at"]].rename(columns={
+                "username": "Username", "email": "Email", "role": "Role",
+                "created_at": "Registered",
+            })
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+            # Management panel — toggled by the "Manage Users" button.
+            if st.session_state.get("manage_users", False):
+                st.divider()
+                st.markdown(
+                    "**Manage Users** — disable to revoke access (soft delete; the "
+                    "record is kept), or re-enable to restore."
+                )
+                me = st.session_state.user
+                for u in users:
+                    c_info, c_status, c_action = st.columns([3, 2, 1], vertical_alignment="center")
+                    c_info.markdown(f"**{u['username']}** · {u['email']}")
+                    c_status.markdown(
+                        f"{u['role']} · {'🟢 Active' if u['is_active'] else '🔴 Disabled'}"
+                    )
+                    if u["id"] == me["id"]:
+                        c_action.caption("(you)")
+                    elif u["is_active"]:
+                        if c_action.button("Disable", key=f"dis_{u['id']}", use_container_width=True):
+                            auth.set_user_active(u["id"], False)
+                            st.rerun()
+                    else:
+                        if c_action.button("Enable", key=f"en_{u['id']}",
+                                           type="primary", use_container_width=True):
+                            auth.set_user_active(u["id"], True)
+                            st.rerun()

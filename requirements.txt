@@ -3,3 +3,12 @@ datasets
 streamlit
 pandas
 mlflow>=3.1
+bcrypt
+SQLAlchemy>=2.0
+psycopg2-binary
+python-dotenv
+# Pinned to match lips-benchmark. TensorFlow 2.8 crashes with protobuf>=4
+# ("Descriptors cannot be created directly"), so do NOT upgrade. The pip resolver
+# will warn about databricks-sdk (a transitive mlflow dep the app never uses) —
+# that warning is safe to ignore.
+protobuf==3.20.2

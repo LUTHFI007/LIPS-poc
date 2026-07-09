@@ -2,8 +2,8 @@
 MLflow tracking wrapper — the ONLY module that talks to MLflow.
 
 Keeping every MLflow call here means the rest of the app stays clean and the
-tracking backend can change (sqlite dev -> Postgres on an HF Space) by setting
-one env var, with no code edits elsewhere.
+tracking server can move by setting one env var (MLFLOW_TRACKING_URI), with no
+code edits elsewhere.
 
 Design rules:
 - The backend store (database) holds queryable run metadata: scores, params,
@@ -14,23 +14,18 @@ Design rules:
 - `import mlflow` is deferred into the functions that need it so importing this
   module (e.g. at Streamlit startup) stays cheap.
 
-Tracking URI resolution:
-    MLFLOW_TRACKING_URI env var  ->  used as-is (prod: the HF Space server URL)
-    otherwise                    ->  sqlite:///<repo>/mlflow.db  (local dev)
+Tracking URI:
+    MLFLOW_TRACKING_URI env var  ->  the MLflow tracking Space (Neon-backed).
+    It is REQUIRED — there is no local sqlite fallback.
 """
 
 import json
 import logging
 import os
-import pathlib
 import re
 from datetime import datetime
 
 _LOG = logging.getLogger(__name__)
-
-# Local dev fallback: an absolute sqlite path so it resolves the same no matter
-# what the working directory is. Gitignored; regenerates on first use.
-_DEFAULT_DB = pathlib.Path(__file__).parent.parent / "mlflow.db"
 
 # MLflow metric/param keys may only contain a limited character set; score keys
 # like "ML (test)" or "Physics Viol. %" are not valid. Map anything to a safe
@@ -39,8 +34,15 @@ _SAFE_KEY_RE = re.compile(r"[^0-9A-Za-z]+")
 
 
 def tracking_uri() -> str:
-    """The MLflow tracking URI: the env override, or the local sqlite dev DB."""
-    return os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{_DEFAULT_DB}")
+    """The MLflow tracking URI from MLFLOW_TRACKING_URI (the tracking Space,
+    Neon-backed). Required — raises if unset so misconfiguration is visible.
+    Callers swallow it: log_evaluation warns, fetch_leaderboard returns []."""
+    uri = os.environ.get("MLFLOW_TRACKING_URI")
+    if not uri:
+        raise RuntimeError(
+            "MLFLOW_TRACKING_URI is not set — point it at the MLflow tracking Space."
+        )
+    return uri
 
 
 def experiment_for(benchmark: str) -> str:
@@ -166,8 +168,61 @@ def fetch_leaderboard(benchmark: "str | None" = None) -> list:
                     **m,
                     "Revision":  (p.get("hf_revision", "") or "")[:8],
                     "Timestamp": ts,
+                    # Internal — used by the admin delete action, not for display.
+                    "run_id":    r.info.run_id,
                 })
         return rows
     except Exception as exc:
         _LOG.warning("MLflow leaderboard fetch failed: %s", exc)
         return []
+
+
+def hard_delete_runs(run_ids: list) -> int:
+    """PERMANENTLY delete runs and all their metrics/params/tags rows from the
+    MLflow backend store, and return how many were deleted.
+
+    Unlike the observability helpers above, this is an explicit admin action, so
+    it RAISES on failure (the UI reports it) instead of swallowing errors.
+
+    MLflow's REST API (the tracking Space) can only *soft*-delete, so a true wipe
+    needs a DIRECT connection to the backend Postgres. This uses
+    MLFLOW_BACKEND_STORE_URI if set, else APP_DB_URI — the same Neon database the
+    MLflow tables live in. Our runs log no artifacts, so this is a clean DB-only
+    delete (no artifact store cleanup needed)."""
+    if not run_ids:
+        return 0
+
+    from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
+
+    backend = _hard_delete_backend_uri()
+    # A direct store handle to the backend DB. default_artifact_root is required
+    # by the constructor but unused here (no artifacts to remove).
+    store = SqlAlchemyStore(backend, default_artifact_root="/tmp/mlartifacts")
+    for run_id in run_ids:
+        store._hard_delete_run(run_id)
+    return len(run_ids)
+
+
+def _hard_delete_backend_uri() -> str:
+    """Resolve the DB to hard-delete from. It MUST be the same backend the
+    scoreboard reads from, or we would delete from the wrong place (or fail to
+    find the run — which is exactly what happens when it points at the auth DB).
+
+    1) MLFLOW_BACKEND_STORE_URI if set (explicit — the tracking Space's backend).
+    2) else, if MLFLOW_TRACKING_URI is itself a direct DB store (not an http
+       server), it IS the backend, so use it.
+    3) else raise — an http tracking server's backend is not reachable from here,
+       so the operator must supply MLFLOW_BACKEND_STORE_URI. We deliberately do
+       NOT fall back to APP_DB_URI (the auth DB, possibly a different database)."""
+    backend = os.environ.get("MLFLOW_BACKEND_STORE_URI")
+    if backend:
+        return backend
+    track = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if track and not track.startswith(("http://", "https://")):
+        return track
+    raise RuntimeError(
+        "Hard delete needs the MLflow BACKEND store URI. Set MLFLOW_BACKEND_STORE_URI "
+        "to the same Postgres your tracking Space uses (its MLFLOW_BACKEND_STORE_URI "
+        "secret). MLFLOW_TRACKING_URI points at an HTTP server whose backend the app "
+        "cannot reach directly."
+    )

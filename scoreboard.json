@@ -112,5 +112,24 @@
     "MAE_ood (a_ex)": 67.5888,
     "MAPE_90_ood (a_or)": 0.1798,
     "MAPE_90_ood (a_ex)": 0.1789
+  },
+  {
+    "Model": "powergrid-benchmark1-torch_fc",
+    "Dataset": "PowerGrid-Benchmark1",
+    "Benchmark": "Benchmark1",
+    "Physics Viol. %": 3.17,
+    "Timestamp": "2026-06-30T14:08:15",
+    "MSE (a_or)": 276.0678,
+    "MSE (a_ex)": 441.8989,
+    "MAE (a_or)": 10.4095,
+    "MAE (a_ex)": 13.8709,
+    "MAPE_90 (a_or)": 0.0296,
+    "MAPE_90 (a_ex)": 0.0293,
+    "MSE_ood (a_or)": 7896.2817,
+    "MSE_ood (a_ex)": 12955.5234,
+    "MAE_ood (a_or)": 43.4592,
+    "MAE_ood (a_ex)": 59.0931,
+    "MAPE_90_ood (a_or)": 0.1606,
+    "MAPE_90_ood (a_ex)": 0.1596
   }
 ]
