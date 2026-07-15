@@ -19,7 +19,8 @@ from lips_poc.model_hub import (
 )
 from lips_poc import tracking
 from lips_poc import auth
-from evaluation_runner import run_evaluation, extract_scores
+from evaluation_runner import run_evaluation, extract_scores, compute_global_scores
+from lips_poc.scoring_profiles import profile_for
 
 _ROOT = Path(__file__).parent
 _LOGO_PATH = _ROOT / "img" / "Logo.png"
@@ -233,10 +234,10 @@ is_admin = user["role"] == "admin"
 # evaluation time, so every run is attributed to the version's real creator
 # regardless of who clicks Evaluate.
 
-_tab_labels = ["Data Hub", "Model Hub", "Scoreboard"] + (["Admin"] if is_admin else [])
+_tab_labels = ["Data Hub", "Model Hub", "Evaluation Runs", "Scoreboard"] + (["Admin"] if is_admin else [])
 _tabs = st.tabs(_tab_labels)
-tab_data, tab_model, tab_scoreboard = _tabs[0], _tabs[1], _tabs[2]
-tab_admin = _tabs[3] if is_admin else None
+tab_data, tab_model, tab_runs, tab_scoreboard = _tabs[0], _tabs[1], _tabs[2], _tabs[3]
+tab_admin = _tabs[4] if is_admin else None
 
 # ── Data Hub ──────────────────────────────────────────────────────────────────
 
@@ -399,7 +400,7 @@ your-model-name.zip
 ├── weights.h5                ← from sim.save()
 ├── config.json               ← from sim.save()
 ├── losses.json               ← from sim.save()
-├── scaler_params.json        ← from sim.save() (only if you used a scaler — optional)
+├── scaler_params.json        ← from sim.save() 
 ├── simulator.ini          ← you provide (downloaded and adjusted below)
 └── augmented_simulator.py ← you provide (downloaded and filled in below)
         """)
@@ -411,7 +412,7 @@ your-model-name.zip
 ├── config.json               ← from sim.save()
 ├── losses.json               ← from sim.save()
 ├── metadata.json             ← from sim.save()
-├── scaler_params.json        ← from sim.save() (only if you used a scaler — optional)
+├── scaler_params.json        ← from sim.save() 
 ├── simulator.ini          ← you provide (downloaded and adjusted below)
 └── augmented_simulator.py ← you provide (downloaded and filled in below)
         """)
@@ -553,8 +554,10 @@ your-model-name.zip
 
 # ── Scoreboard ────────────────────────────────────────────────────────────────
 
-with tab_scoreboard:
-    st.subheader("Scoreboard")
+with tab_runs:
+    st.subheader("Evaluation Runs")
+    st.caption("Every evaluation you run, with all raw metrics and the six global-score "
+               "numbers. The ranked, visual leaderboard lives in the Scoreboard tab.")
 
     sel_ds = st.session_state.get("selected_dataset")
     sel_m   = st.session_state.get("selected_model") or None
@@ -611,6 +614,14 @@ with tab_scoreboard:
                             revision=sel_rev,
                         )
                         scores = extract_scores(results)
+                        # Competition global score: six numbers (Global Score + the
+                        # four category sub-scores + Speed-up) and the per-variable
+                        # bulb colours. Empty if the benchmark has no scoring profile.
+                        gs_numbers, gs_colors = compute_global_scores(
+                            results,
+                            DATASET_REGISTRY[ds_key]["benchmark_name"],
+                            DATASET_REGISTRY[ds_key]["config_path"],
+                        )
                     except Exception as e:
                         import traceback
                         st.error(f"Evaluation failed: {e}\n\n```\n{traceback.format_exc()}\n```")
@@ -620,6 +631,7 @@ with tab_scoreboard:
                     "Model":     sel_m.split("/")[-1],
                     "Dataset":   ds_key,
                     "Benchmark": DATASET_REGISTRY[ds_key]["benchmark_name"],
+                    **gs_numbers,
                     **scores,
                     "Timestamp": datetime.now().isoformat(timespec="seconds"),
                 }
@@ -640,19 +652,30 @@ with tab_scoreboard:
                         "author":         author,
                         "version":        version,
                         "parent_version": meta["parent_version"],
+                        **gs_colors,
                         **tracking.flatten_config(model_config),
                     },
-                    metrics=scores,
+                    metrics={**gs_numbers, **scores},
                     tags={"author": author, "version": version, "hf_revision": hf_revision},
                 )
 
                 st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
                 st.rerun()
 
-    # The scoreboard reads solely from the MLflow tracking store (the system of
+    # The runs read solely from the MLflow tracking store (the system of
     # record — Neon Postgres via MLFLOW_TRACKING_URI). sb_rows was fetched above.
     if sb_rows:
-        show_df = pd.DataFrame(sb_rows).drop(columns=["run_id"], errors="ignore")
+        # Drop internal / bulb-colour columns (the latter drive the Scoreboard's
+        # traffic lights, not this numeric table), and lead with the six global
+        # score numbers so they sit right after the identity columns.
+        _HIDE = ["run_id", "gs_test_ml", "gs_test_phys", "gs_ood_ml", "gs_ood_phys",
+                 "scoring_version"]
+        _LEAD = ["Model", "Version", "Author", "Benchmark",
+                 "Global_Score", "ML_test", "Physics_test", "ML_ood", "Physics_ood", "Speed_up"]
+        show_df = pd.DataFrame(sb_rows).drop(columns=_HIDE, errors="ignore")
+        _ordered = [c for c in _LEAD if c in show_df.columns] + \
+                   [c for c in show_df.columns if c not in _LEAD]
+        show_df = show_df[_ordered]
         if is_admin:
             st.caption("Check runs on the left, then click **Delete** above to permanently remove them.")
             st.dataframe(
@@ -667,6 +690,90 @@ with tab_scoreboard:
             st.dataframe(show_df, use_container_width=True, hide_index=True)
     else:
         st.info("No evaluations recorded yet, or the tracking store is unavailable.")
+
+# ── Scoreboard (visualized, competition-style) ─────────────────────────────────
+
+_BULB = {"g": "🟢", "o": "🟠", "r": "🔴"}
+
+
+def _bulbs(color_str: str) -> str:
+    """Render a g/o/r colour string as traffic-light bulbs (profile order)."""
+    return "".join(_BULB.get(c, "") for c in (color_str or "")) or "—"
+
+
+with tab_scoreboard:
+    st.subheader("Scoreboard")
+    st.caption("Ranked leaderboard — one row per model + version, highest Global Score first. "
+               "Bulbs are the competition's per-variable ratings 🟢 great · 🟠 acceptable · 🔴 unacceptable. "
+               "Click **View metrics** to expand a row's full numbers.")
+
+    all_rows = tracking.fetch_leaderboard()
+    # Use Case + Benchmark selectors. Both are future-proofed: the benchmark list is
+    # derived from the runs that actually have a scoring profile, so new benchmarks
+    # appear automatically once they're evaluated.
+    scored_benches = sorted({
+        r.get("Benchmark", "") for r in all_rows
+        if r.get("Benchmark") and profile_for(r.get("Benchmark", ""))
+    })
+    c_uc, c_bm = st.columns(2)
+    c_uc.selectbox("Use Case", ["Power Grid"], index=0)
+
+    if not scored_benches:
+        c_bm.selectbox("Benchmark", ["— none scored yet —"], index=0, disabled=True)
+        st.info("No models have a Global Score yet. Run an evaluation in the "
+                "**Evaluation Runs** tab to populate the leaderboard.")
+    else:
+        benchmark = c_bm.selectbox("Benchmark", scored_benches, index=0)
+        profile = profile_for(benchmark)
+        ml_labels = list(profile["ml"].keys())
+        ph_labels = list(profile["physics"].keys())
+
+        # One row per (Model, Version): keep the most recent evaluation. Re-running an
+        # already-scored model+version never adds a new leaderboard entry.
+        scored = [r for r in all_rows
+                  if r.get("Benchmark") == benchmark and r.get("Global_Score") is not None]
+        latest: dict = {}
+        for r in sorted(scored, key=lambda x: x.get("Timestamp", ""), reverse=True):
+            latest.setdefault((r.get("Model"), r.get("Version")), r)
+        ranked = sorted(latest.values(),
+                        key=lambda x: x.get("Global_Score", 0.0), reverse=True)
+
+        if not ranked:
+            st.info("No models have a Global Score for this benchmark yet.")
+        else:
+            # st.caption("Bulb order — **ML:** " + ", ".join(ml_labels)
+            #            + "  ·  **Physics:** " + ", ".join(ph_labels))
+
+            widths = [0.6, 2.2, 0.8, 1.5, 1.7, 0.9, 1.5, 1.7, 1.0]
+            headers = ["Rank", "Model", "Ver", "Test·ML", "Test·Phys",
+                       "Speed", "OOD·ML", "OOD·Phys", "Global"]
+            hdr = st.columns(widths)
+            for col, label in zip(hdr, headers):
+                col.markdown(f"**{label}**")
+
+            _HIDE = {"run_id", "gs_test_ml", "gs_test_phys", "gs_ood_ml",
+                     "gs_ood_phys", "scoring_version", "Global_Score"}
+            for i, r in enumerate(ranked, start=1):
+                c = st.columns(widths, vertical_alignment="center")
+                c[0].markdown(("🏆 " if i == 1 else "") + f"**{i}**")
+                c[1].markdown(r.get("Model", ""))
+                c[2].markdown(r.get("Version", "") or "—")
+                c[3].markdown(_bulbs(r.get("gs_test_ml")))
+                c[4].markdown(_bulbs(r.get("gs_test_phys")))
+                sp = r.get("Speed_up")
+                c[5].markdown(f"{sp:.1f}×" if isinstance(sp, (int, float)) else "—")
+                c[6].markdown(_bulbs(r.get("gs_ood_ml")))
+                c[7].markdown(_bulbs(r.get("gs_ood_phys")))
+                gv = r.get("Global_Score")
+                c[8].markdown(f"**{gv:.1f}**" if isinstance(gv, (int, float)) else "—")
+
+                with st.expander("View metrics"):
+                    detail = {k: v for k, v in r.items()
+                              if k not in _HIDE and isinstance(v, (int, float))}
+                    st.dataframe(
+                        pd.DataFrame([{"Metric": k, "Value": v} for k, v in detail.items()]),
+                        use_container_width=True, hide_index=True,
+                    )
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 

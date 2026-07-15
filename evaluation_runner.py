@@ -3,12 +3,18 @@
 # before Streamlit launches. All heavy imports are deferred into the
 # functions that need them and only execute when Evaluate is clicked.
 
+import json
 import pathlib
 from typing import Optional
 
 from huggingface_hub import snapshot_download, ModelCard, HfApi
 
 _MODELS_DIR = pathlib.Path(__file__).parent / "models"
+
+# Cached AC-solver reference time per benchmark (for the speed-up sub-score).
+# Computing it runs the physical solver (~20s), so it is memoized to disk and
+# reused across evaluations of the same benchmark.
+_SPEED_CACHE = pathlib.Path(__file__).parent / "speed_reference_cache.json"
 
 # Fallback: infer model type from repo name if no HF tag is set.
 # Keys are checked in order — more specific keys must come first.
@@ -345,6 +351,92 @@ def _flatten_metric(values: dict, label: str, out: dict) -> None:
     for var, val in values.items():
         if isinstance(val, (int, float)):
             out[f"{label} ({var})"] = round(val, 4)
+
+
+def _reference_solver_time(benchmark_name: str, config_path: str) -> Optional[float]:
+    """AC (LightSim2Grid/Grid2Op) solver time used as the speed-up reference,
+    mirroring utils/compute_score.compute_speed_up (nb_samples=1e5). Cached to
+    disk per benchmark; returns None if the solver time can't be computed."""
+    cache: dict = {}
+    if _SPEED_CACHE.exists():
+        try:
+            cache = json.loads(_SPEED_CACHE.read_text())
+        except Exception:
+            cache = {}
+    if benchmark_name in cache:
+        return cache[benchmark_name]
+
+    try:
+        from lips.metrics.power_grid.compute_solver_time_grid2op import (
+            compute_solver_time_grid2op,
+        )
+        t = compute_solver_time_grid2op(
+            config_path=config_path,
+            benchmark_name=benchmark_name,
+            nb_samples=int(1e5),
+        )
+    except Exception as e:
+        print(f"Reference solver time unavailable for {benchmark_name}: {e}")
+        return None
+
+    cache[benchmark_name] = t
+    try:
+        _SPEED_CACHE.write_text(json.dumps(cache, indent=2))
+    except Exception:
+        pass
+    return t
+
+
+def _speed_up(results: dict, benchmark_name: str, config_path: str) -> Optional[float]:
+    """speed_up = reference_solver_time / model_inference_time (TIME_INF), exactly
+    as the competition computes it (on the test split only)."""
+    time_inf = results.get("test", {}).get("ML", {}).get("TIME_INF")
+    if not time_inf:
+        return None
+    ref = _reference_solver_time(benchmark_name, config_path)
+    if not ref:
+        return None
+    return ref / time_inf
+
+
+def compute_global_scores(results: dict, benchmark_name: str, config_path: str) -> tuple:
+    """Turn a raw evaluation into (numbers, color_params) for the scoreboard.
+
+    numbers: the six persisted metrics — Global Score, ML/Physics (test), ML/Physics
+      (ood), Speed-up. Logged to MLflow as metrics (the Evaluation Runs numbers and
+      the Scoreboard's ranking key).
+    color_params: per-variable traffic-light strings (g/o/r, in profile order) for
+      the four blocks + the scoring version — logged as MLflow params so the
+      Scoreboard can render the competition-style bulbs without re-deriving.
+
+    Returns ({}, {}) if the benchmark has no scoring profile defined yet."""
+    from lips_poc.scoring_profiles import profile_for, SCORING_VERSION
+    from lips_poc.global_score import (
+        build_score_inputs, compute_global_score, variable_colors,
+    )
+
+    profile = profile_for(benchmark_name)
+    if profile is None:
+        return {}, {}
+
+    speed_up = _speed_up(results, benchmark_name, config_path)
+    numbers = compute_global_score(*build_score_inputs(results, profile), speed_up=speed_up)
+    colors = variable_colors(results, profile)
+
+    def _enc(split: str, group: str, keys: list) -> str:
+        block = colors.get(split, {}).get(group, {})
+        return "".join(block.get(k, "") for k in keys)
+
+    ml_keys = list(profile["ml"].keys())
+    ph_keys = list(profile["physics"].keys())
+    color_params = {
+        "gs_test_ml":      _enc("test", "ML", ml_keys),
+        "gs_test_phys":    _enc("test", "Physics", ph_keys),
+        "gs_ood_ml":       _enc("ood", "ML", ml_keys),
+        "gs_ood_phys":     _enc("ood", "Physics", ph_keys),
+        "scoring_version": SCORING_VERSION,
+    }
+    return numbers, color_params
 
 
 def extract_scores(results: dict) -> dict:

@@ -168,6 +168,15 @@ def fetch_leaderboard(benchmark: "str | None" = None) -> list:
                     **m,
                     "Revision":  (p.get("hf_revision", "") or "")[:8],
                     "Timestamp": ts,
+                    # Per-variable bulb colours (g/o/r strings, profile order) + the
+                    # scoring version — logged as params, used by the Scoreboard to
+                    # render the competition-style traffic lights. Absent on legacy
+                    # runs (predating global scoring), which the Scoreboard skips.
+                    "gs_test_ml":      p.get("gs_test_ml", ""),
+                    "gs_test_phys":    p.get("gs_test_phys", ""),
+                    "gs_ood_ml":       p.get("gs_ood_ml", ""),
+                    "gs_ood_phys":     p.get("gs_ood_phys", ""),
+                    "scoring_version": p.get("scoring_version", ""),
                     # Internal — used by the admin delete action, not for display.
                     "run_id":    r.info.run_id,
                 })

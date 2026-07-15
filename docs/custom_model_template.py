@@ -16,6 +16,7 @@ from tensorflow import keras
 from lips.augmented_simulators.tensorflow_models.powergrid.fully_connected import (
     TfFullyConnectedPowerGrid,
 )
+from lips.dataset.scaler import StandardScaler
 
 
 class MyAugmentedSimulator(TfFullyConnectedPowerGrid):
@@ -100,6 +101,11 @@ if __name__ == "__main__":
         sim_config_path=SIM_CONFIG,
         bench_config_path=BENCH_CONFIG,
         bench_config_name=BENCHMARK_NAME,
+        # StandardScaler normalizes inputs/outputs during training AND makes
+        # sim.save() write a scaler_params.json alongside your weights. The
+        # evaluator needs that file to de-normalize predictions — WITHOUT it your
+        # scores come out enormous. Do NOT remove this argument.
+        scaler=StandardScaler,
         log_path=None,
     )
 

@@ -23,6 +23,7 @@ from torch import nn
 from lips.augmented_simulators.torch_models.fully_connected import (
     TorchFullyConnected,
 )
+from lips.dataset.scaler import StandardScaler
 
 
 class MyAugmentedSimulator(TorchFullyConnected):
@@ -116,6 +117,11 @@ if __name__ == "__main__":
         name="my_model",
         bench_config_path=BENCH_CONFIG,
         bench_config_name=BENCHMARK_NAME,
+        # StandardScaler normalizes inputs/outputs during training AND makes
+        # sim.save() write a scaler_params.json alongside your weights. The
+        # evaluator needs that file to de-normalize predictions — WITHOUT it your
+        # scores come out enormous. Do NOT remove this argument.
+        scaler=StandardScaler,
         log_path=None,
     )
 
