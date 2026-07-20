@@ -11,6 +11,10 @@ from huggingface_hub import snapshot_download, ModelCard, HfApi
 
 _MODELS_DIR = pathlib.Path(__file__).parent / "models"
 
+# Versioned-dataset snapshots downloaded from lakeFS, keyed by commit id —
+# the dataset counterpart of the models/ cache below.
+_DATASETS_CACHE = pathlib.Path(__file__).parent / "datasets" / "cache"
+
 # Cached AC-solver reference time per benchmark (for the speed-up sub-score).
 # Computing it runs the physical solver (~20s), so it is memoized to disk and
 # reused across evaluations of the same benchmark.
@@ -100,6 +104,33 @@ def _download_model(repo_id: str, revision: "str | None" = None) -> tuple[str, s
         dst.symlink_to(src)
 
     return str(_MODELS_DIR), str(lips_dir), sha
+
+
+def _download_dataset(lakefs_repo: str, commit_id: str, benchmark_name: str) -> str:
+    """Download the FULL dataset snapshot (all four splits) at a lakeFS commit
+    into datasets/cache/{repo}__{commit12}/{benchmark_name}/ and return the
+    benchmark_path (the parent dir — PowerGridBenchmark expects
+    benchmark_path/<benchmark_name>/<splits>).
+
+    Mirrors _download_model: the immutable commit id is the cache key, so a
+    version re-run downloads nothing and a new version never reuses a stale
+    cache. The snapshot lands under a temp name and is renamed into place, so
+    an interrupted download can't masquerade as a complete cache."""
+    root   = _DATASETS_CACHE / f"{lakefs_repo}__{commit_id[:12]}"
+    target = root / benchmark_name
+
+    if not target.exists():
+        from lips_poc import lakefs_store
+
+        tmp = root / f".{benchmark_name}.partial"
+        if tmp.exists():
+            import shutil
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
+        lakefs_store.download_snapshot(lakefs_repo, commit_id, str(tmp))
+        tmp.rename(target)
+
+    return str(root)
 
 
 def _load_custom_class(model_files_path, base_cls):
@@ -288,6 +319,7 @@ def run_evaluation(
     model_repo_id: str,
     eval_splits: tuple = ("test", "test_ood_topo"),
     revision: "str | None" = None,
+    dataset_revision: "str | None" = None,
 ) -> "tuple[dict, str, dict]":
     from lips.benchmark.powergridBenchmark import PowerGridBenchmark
 
@@ -296,9 +328,20 @@ def run_evaluation(
     model_config = _read_model_config(model_files)
     simulator    = _load_simulator(model_type, restore_base, model_files, dataset_info)
 
+    # Versioned datasets: fetch the exact snapshot (lakeFS commit) the user
+    # selected. Legacy datasets without a lakeFS repo (or without a selected
+    # version) keep reading the fixed local dataset_root.
+    lakefs_repo = dataset_info.get("lakefs_repo")
+    if lakefs_repo and dataset_revision:
+        benchmark_path = _download_dataset(
+            lakefs_repo, dataset_revision, dataset_info["benchmark_name"]
+        )
+    else:
+        benchmark_path = dataset_info["dataset_root"]
+
     benchmark = PowerGridBenchmark(
         benchmark_name=dataset_info["benchmark_name"],
-        benchmark_path=dataset_info["dataset_root"],
+        benchmark_path=benchmark_path,
         load_data_set=True,
         config_path=dataset_info["config_path"],
     )

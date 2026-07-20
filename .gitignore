@@ -35,3 +35,13 @@ app_users.db
 
 # Local secrets — real values live here, never committed
 .env
+
+# Local lakeFS + MinIO stack: binaries, stored data, logs, generated secrets
+deploy/lakefs-local/bin/
+deploy/lakefs-local/data/
+deploy/lakefs-local/logs/
+deploy/lakefs-local/local.env
+deploy/lakefs-local/lakefs.yaml
+
+# Versioned-dataset download cache (keyed by lakeFS commit)
+datasets/cache/

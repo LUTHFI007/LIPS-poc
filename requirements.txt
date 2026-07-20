@@ -1,4 +1,5 @@
 huggingface_hub
+lakefs-sdk
 datasets
 streamlit
 pandas

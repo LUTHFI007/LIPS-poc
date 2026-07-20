@@ -165,6 +165,7 @@ def fetch_leaderboard(benchmark: "str | None" = None) -> list:
                     "Author":    p.get("author", ""),
                     "Version":   p.get("version", ""),
                     "Benchmark": bench,
+                    "Dataset Version": p.get("ds_version", ""),
                     **m,
                     "Revision":  (p.get("hf_revision", "") or "")[:8],
                     "Timestamp": ts,

@@ -1,0 +1,3 @@
+[server]
+# Dataset ZIPs exceed Streamlit's 200 MB default upload cap.
+maxUploadSize = 2000

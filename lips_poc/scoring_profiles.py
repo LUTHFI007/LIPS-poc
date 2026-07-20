@@ -62,6 +62,14 @@ PROFILES = {
     # Drop-in for later: yields the exact competition Global Score with no code
     # change once that benchmark's dataset/models are wired in.
     "Benchmark_competition": COMPETITION_PROFILE,
+
+    # Benchmark2 grades the exact same 6 quantities (a_or/a_ex/p_or/p_ex/v_or/v_ex)
+    # as the competition profile, so it's reused as-is. NOTE: these thresholds
+    # were calibrated on a different LIPS environment (lips_idf_2023, per
+    # files/5_Scoring.ipynb) — a reasonable starting point, not custom-fit to
+    # l2rpn_case14_sandbox. Recalibrate (and bump SCORING_VERSION) once enough
+    # real Benchmark2 runs justify tuning them.
+    "Benchmark2": COMPETITION_PROFILE,
 }
 
 

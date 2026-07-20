@@ -12,13 +12,20 @@ load_dotenv()
 import pandas as pd
 import streamlit as st
 
-from lips_poc.data_hub import search_datasets
+from lips_poc.data_hub import (
+    search_datasets, list_dataset_versions, next_dataset_version,
+    get_dataset_version_metadata, validate_dataset_upload_inputs,
+    upload_dataset, upload_new_dataset_version,
+    available_benchmark_names, register_dataset,
+)
 from lips_poc.model_hub import (
     search_models, validate_upload_inputs, upload_model, upload_new_version,
     list_versions, next_version, get_version_metadata, version_for_revision,
 )
 from lips_poc import tracking
 from lips_poc import auth
+from lips_poc import lakefs_store
+from lips_poc.hub_versioning import version_num
 from evaluation_runner import run_evaluation, extract_scores, compute_global_scores
 from lips_poc.scoring_profiles import profile_for
 
@@ -36,11 +43,57 @@ _DOCS_DIR = _ROOT / "docs"
 # byte-identical file — never copied/edited, so train-time == eval-time.
 _BENCH_CONFIG_PATH = _ROOT / "configurations/powergrid/benchmarks/benchmark.ini"
 
+# What each benchmark actually asks a model to predict, and why — sourced from
+# LIPS's own getting-started notebooks (IRT-SystemX/LIPS,
+# getting_started/PowerGridUsecase) cross-checked against benchmark.ini's
+# attr_y per section. Shown to whoever is about to build a model, since the
+# platform has no way to tell them this otherwise — LIPS's own docs live
+# outside this app.
+_BENCHMARK_BUILD_INFO = {
+    "Benchmark1": {
+        "purpose": "Risk assessment via contingency screening — scan many "
+                   "what-if scenarios (a line going down) to catch overloads "
+                   "before they happen.",
+        "outputs": "`a_or`, `a_ex` — electric current (A) at both ends of "
+                   "each line. (2 outputs)",
+    },
+    "Benchmark2": {
+        "purpose": "Remedial action search — given a detected overload, check "
+                   "whether a candidate topology change (substation "
+                   "reconfiguration) actually fixes it without creating a new "
+                   "current *or* voltage problem elsewhere.",
+        "outputs": "`a_or`, `a_ex`, `p_or`, `p_ex`, `v_or`, `v_ex` — current "
+                   "(A), active power (MW), and voltage (V) at both ends of "
+                   "each line. (6 outputs)",
+    },
+    "Benchmark3": {
+        "purpose": "Validation of decision — the final, highest-fidelity check "
+                   "run just before an operator actually applies a remedial "
+                   "action on the real grid, so accuracy matters more here "
+                   "than in Benchmark1/2.",
+        "outputs": "`a_or`, `a_ex`, `p_or`, `p_ex`, `q_or`, `q_ex`, `prod_q`, "
+                   "`load_v`, `v_or`, `v_ex`, `theta_or`, `theta_ex` — "
+                   "everything: current, active *and* reactive power, "
+                   "voltage, and voltage angle at both ends of each line. "
+                   "(12 outputs)",
+    },
+}
+
 
 def _doc_bytes(filename: str) -> bytes:
     """Read a file from docs/ as bytes for st.download_button. Passing bytes
     (not an open handle) makes browsers honour the exact download file_name."""
     return (_DOCS_DIR / filename).read_bytes()
+
+
+def _template_bytes(filename: str, benchmark_name: str) -> bytes:
+    """Like _doc_bytes, but for the custom-model templates: swaps the
+    hardcoded BENCHMARK_NAME for the one the user picked above, so the
+    downloaded file already targets the right benchmark.ini section — no
+    manual edit, no chance of silently training/scoring against the wrong one."""
+    text = (_DOCS_DIR / filename).read_text()
+    text = text.replace('BENCHMARK_NAME = "Benchmark1"', f'BENCHMARK_NAME = "{benchmark_name}"')
+    return text.encode()
 
 with (_ROOT / "dataset_registry.json").open() as f:
     DATASET_REGISTRY = json.load(f)
@@ -67,13 +120,26 @@ def _fetch_versions(repo_id: str) -> list[dict]:
     return rows
 
 
+@st.cache_data(ttl=300)
+def _fetch_ds_versions(repo_id: str) -> list[dict]:
+    """A dataset's versions (newest first), enriched with author/parent read
+    from the HF dataset card."""
+    rows = []
+    for v in list_dataset_versions(repo_id):
+        meta = get_dataset_version_metadata(repo_id, v["version"])
+        rows.append({**v, "author": meta["author"], "parent_version": meta["parent_version"]})
+    return rows
+
+
 # Clear stale selections on every new browser session
 if "initialized" not in st.session_state:
-    st.session_state.selected_dataset  = None
-    st.session_state.selected_model    = None
-    st.session_state.selected_version  = None
-    st.session_state.selected_revision = None
-    st.session_state.initialized       = True
+    st.session_state.selected_dataset     = None
+    st.session_state.selected_ds_version  = None
+    st.session_state.selected_ds_revision = None
+    st.session_state.selected_model       = None
+    st.session_state.selected_version     = None
+    st.session_state.selected_revision    = None
+    st.session_state.initialized          = True
 
 # ── Page setup ────────────────────────────────────────────────────────────────
 
@@ -243,12 +309,26 @@ tab_admin = _tabs[4] if is_admin else None
 
 with tab_data:
     st.subheader("Data Hub")
-    st.caption("Click a row to select it.")
+    st.caption("Click a row to select it; pick a version below if the dataset has version tags.")
     datasets = _fetch_datasets()
     if not datasets:
         st.warning("No datasets found on HuggingFace (lips-poc org).")
     else:
-        ds_df = pd.DataFrame(datasets)
+        # One row per dataset, with a Versions column listing its tags — same
+        # pattern as the Model Hub table.
+        ds_versions_by_repo = {}
+        ds_rows = []
+        for d in datasets:
+            ds_id = d["Dataset ID"]
+            ds_versions = _fetch_ds_versions(ds_id)
+            ds_versions_by_repo[ds_id] = ds_versions
+            ds_rows.append({
+                "Dataset ID":    ds_id,
+                "Versions":      ", ".join(v["version"] for v in reversed(ds_versions)) or "(none)",
+                "Last Modified": d.get("Last Modified", ""),
+                "URL":           d.get("URL", ""),
+            })
+        ds_df = pd.DataFrame(ds_rows)
         ds_event = st.dataframe(
             ds_df,
             use_container_width=True,
@@ -259,8 +339,138 @@ with tab_data:
         )
         selected_ds_rows = ds_event.selection.rows
         if selected_ds_rows:
-            st.session_state.selected_dataset = ds_df.iloc[selected_ds_rows[0]]["Dataset ID"]
-            st.success(f"Selected: **{st.session_state.selected_dataset}**")
+            ds_id = ds_df.iloc[selected_ds_rows[0]]["Dataset ID"]
+            st.session_state.selected_dataset = ds_id
+            ds_versions = ds_versions_by_repo.get(ds_id, [])
+            if ds_versions:
+                ds_ver_names = [v["version"] for v in ds_versions]  # newest first
+                ds_chosen = st.selectbox("Dataset version", ds_ver_names, key=f"ds_ver::{ds_id}")
+                ds_vinfo = next(v for v in ds_versions if v["version"] == ds_chosen)
+                st.session_state.selected_ds_version  = ds_chosen
+                st.session_state.selected_ds_revision = ds_vinfo["revision"]
+                ds_detail = f"author `{ds_vinfo['author']}` · commit `{ds_vinfo['revision'][:8]}`"
+                if ds_vinfo["parent_version"]:
+                    ds_detail += f" · parent {ds_vinfo['parent_version']}"
+                st.success(f"Selected **{ds_id.split('/')[-1]} @ {ds_chosen}** — {ds_detail}")
+                st.caption("Evaluations run on this exact version's snapshot, "
+                           "fetched from the private dataset store.")
+            else:
+                # Datasets uploaded before versioning have no tags; they stay
+                # selectable so evaluation keeps working.
+                st.session_state.selected_ds_version  = None
+                st.session_state.selected_ds_revision = None
+                st.success(f"Selected: **{ds_id}** (no version tags yet)")
+
+    # ── Dataset management (admin only) ───────────────────────────────────────
+    # Uploading and versioning datasets is an admin capability; regular users
+    # only browse and select. Mirrors the Model Hub upload flow.
+    if is_admin:
+        st.divider()
+        st.subheader("Dataset Management")
+        st.caption("Admin only — upload a new dataset or publish a new version of an existing one.")
+
+        with st.expander("How to prepare a dataset ZIP"):
+            st.markdown("""
+            Zip the **contents** of the dataset folder — **all four splits are
+            required** (a single wrapping folder is also accepted and stripped
+            automatically):
+            ```
+            my-dataset.zip
+            ├── train/            → published publicly (HuggingFace)
+            ├── val/              → published publicly (HuggingFace)
+            ├── test/             → stored privately (lakeFS) — evaluation only
+            └── test_ood_topo/    → stored privately (lakeFS) — evaluation only
+            ```
+            The ZIP is extracted server-side and split automatically: the public
+            splits go to the HuggingFace dataset repo (browsing + training data),
+            while the **full** dataset goes to the private lakeFS store that
+            evaluation runs against — test data never reaches HuggingFace.
+            Each published version is the same tag (v0, v1, ...) on both stores,
+            pointing at immutable commits, so every version stays reproducible
+            forever.
+            """)
+
+        ds_upload_mode = st.radio(
+            "Upload mode",
+            ["New dataset", "New version of existing dataset"],
+            horizontal=True,
+            key="ds_upload_mode",
+        )
+        ds_is_new_version = ds_upload_mode == "New version of existing dataset"
+
+        # Author is bound to the signed-in admin — same rule as model uploads.
+        st.text_input("Uploading as", value=user["username"], disabled=True, key="ds_author")
+
+        if ds_is_new_version:
+            existing_ds = [d["Dataset ID"].split("/")[-1] for d in (datasets or [])]
+            ds_repo_name = st.selectbox("Existing dataset", existing_ds, key="ds_existing") if existing_ds else None
+            if ds_repo_name:
+                st.caption(
+                    f"Will publish **lips-poc/{ds_repo_name}** as "
+                    f"**{next_dataset_version(f'lips-poc/{ds_repo_name}')}**."
+                )
+        else:
+            ds_repo_name = st.text_input("Dataset name", placeholder="my-dataset", key="ds_new_name")
+            if ds_repo_name:
+                st.caption(f"Will be uploaded as: `lips-poc/{ds_repo_name}` (Version **v0**)")
+
+            ds_benchmark_name = st.selectbox(
+                "LIPS Benchmark", available_benchmark_names(), key="ds_benchmark_name",
+                help="Which benchmark.ini section this dataset's data matches. Determines "
+                     "what evaluation expects your data to contain — set once, at publish; "
+                     "later versions of this dataset reuse it automatically.",
+            )
+
+        ds_description = st.text_area(
+            "Description (optional)", key="ds_desc",
+            help="Markdown supported — becomes the dataset card (README) body. "
+                 "When publishing a new version, leaving this empty keeps the "
+                 "card's existing text.",
+        )
+
+        ds_zip_bytes = None
+        ds_uploaded = st.file_uploader("Dataset ZIP", type=["zip"], key="ds_zip")
+        if ds_uploaded:
+            ds_zip_bytes = ds_uploaded.read()
+
+        # On the rerun after a successful upload, show success and skip
+        # validation once — otherwise the just-created repo would be re-detected
+        # and falsely reported as "already exists".
+        ds_just_uploaded = st.session_state.pop("ds_upload_success", None)
+        if ds_just_uploaded:
+            st.success(f"Uploaded successfully as `{ds_just_uploaded}`.")
+            ds_errors = []
+        else:
+            ds_errors = validate_dataset_upload_inputs(
+                ds_repo_name or "", ds_zip_bytes, new_version=ds_is_new_version
+            )
+            for err in ds_errors:
+                st.error(err)
+
+        if st.button("Confirm Dataset Upload", type="primary", disabled=bool(ds_errors), key="ds_upload_btn"):
+            with st.spinner("Uploading dataset to HuggingFace…"):
+                try:
+                    if ds_is_new_version:
+                        ds_repo_id, ds_new_tag = upload_new_dataset_version(
+                            ds_repo_name, ds_zip_bytes, ds_description, author=user["username"],
+                        )
+                        st.session_state.ds_upload_success = f"{ds_repo_id} ({ds_new_tag})"
+                    else:
+                        ds_repo_id = upload_dataset(
+                            ds_repo_name, ds_zip_bytes, ds_description, author=user["username"],
+                        )
+                        # Publishing alone doesn't make a dataset evaluable — Evaluate
+                        # checks dataset_registry.json. Register it immediately so it's
+                        # usable without a manual follow-up step. DATASET_REGISTRY is
+                        # reloaded from disk on the st.rerun() below, so no in-memory
+                        # patch is needed here.
+                        register_dataset(ds_repo_name, ds_benchmark_name)
+                        st.session_state.ds_upload_success = f"{ds_repo_id} (v0)"
+                    st.cache_data.clear()
+                    st.session_state.selected_dataset = ds_repo_id
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Upload failed: {e}")
 
 # ── Model Hub ─────────────────────────────────────────────────────────────────
 
@@ -317,6 +527,23 @@ with tab_model:
     st.divider()
     st.subheader("Build Your Own Model")
 
+    build_benchmark = st.radio(
+        "Available Benchmarks :",
+        available_benchmark_names(),
+        horizontal=True,
+        key="build_benchmark",
+    )
+    _info = _BENCHMARK_BUILD_INFO.get(build_benchmark, {})
+    st.info(
+        f"**Purpose:** {_info.get('purpose', '')}\n\n"
+        f"**Your model must output:** {_info.get('outputs', '')}"
+    )
+    st.caption(
+        "The templates and simulator config below are generated for "
+        f"**{build_benchmark}** — switch the choice above before downloading "
+        "if you're targeting a different one."
+    )
+
     with st.expander("How to build and submit a model — read the instructions carefully!"):
         st.markdown("""
         ### Step-by-step
@@ -354,13 +581,19 @@ with tab_model:
 
         **Step 1 — Download the template for your framework**
         Use the buttons below. The template is a Python file with one class you
-        fill in. Everything else (data loading, preprocessing, training loop,
-        save/restore) is handled by LIPS automatically.
+        fill in, already set up for the benchmark you picked above (its
+        `BENCHMARK_NAME` is pre-filled — no manual edit needed). Everything else
+        (data loading, preprocessing, training loop, save/restore) is handled by
+        LIPS automatically.
 
         **Step 2 — Fill in `build_model()`**
         Open the template and replace the example architecture in `build_model()`
         with your own. Read the comments — they explain exactly what variables are
-        available and what you must assign.
+        available and what you must assign. You do **not** need to hardcode how
+        many outputs your benchmark expects — `self.output_size` is set
+        automatically from the benchmark you picked — but see the box above for
+        what those outputs physically mean, since that should inform your
+        architecture and loss choices.
 
         **Step 3 — Download and adjust the `.ini` config**
         The `.ini` file controls your model's hyperparameters (layer sizes, learning
@@ -369,11 +602,14 @@ with tab_model:
         you put in `build_model()`.
 
         **Step 3b — Download the benchmark config**
-        Also download `benchmark.ini` (button below). This is the fixed
-        benchmark every model is scored against. Point `BENCH_CONFIG` in the template
-        at it and train against it **as-is** — do not edit or rename it. It is *not*
-        part of your ZIP; it stays on your machine for training only. Training against
-        a different benchmark config produces invalid scores.
+        Also download `benchmark.ini` (button below). It's a single shared file
+        with a section for every benchmark — the same download works no matter
+        which one you picked above, since your template's `BENCHMARK_NAME`
+        already points LIPS at the right section. Point `BENCH_CONFIG` in the
+        template at it and train against it **as-is** — do not edit or rename
+        it. It is *not* part of your ZIP; it stays on your machine for training
+        only. Training against a different benchmark config, or a mismatched
+        `BENCHMARK_NAME`, produces invalid scores.
 
         **Step 4 — Train your model**
         Run the training script at the bottom of the template file:
@@ -428,8 +664,8 @@ your-model-name.zip
     with col_tf:
         st.markdown("**TensorFlow**")
         st.download_button(
-            "Download TF template",
-            data=_doc_bytes("custom_model_template.py"),
+            f"Download TF template ({build_benchmark})",
+            data=_template_bytes("custom_model_template.py", build_benchmark),
             file_name="augmented_simulator.py",
             mime="application/octet-stream",
         )
@@ -443,8 +679,8 @@ your-model-name.zip
     with col_torch:
         st.markdown("**PyTorch**")
         st.download_button(
-            "Download PyTorch template",
-            data=_doc_bytes("custom_model_template_torch.py"),
+            f"Download PyTorch template ({build_benchmark})",
+            data=_template_bytes("custom_model_template_torch.py", build_benchmark),
             file_name="augmented_simulator.py",
             mime="application/octet-stream",
         )
@@ -559,13 +795,18 @@ with tab_runs:
     st.caption("Every evaluation you run, with all raw metrics and the six global-score "
                "numbers. The ranked, visual leaderboard lives in the Scoreboard tab.")
 
-    sel_ds = st.session_state.get("selected_dataset")
+    sel_ds     = st.session_state.get("selected_dataset")
+    sel_ds_ver = st.session_state.get("selected_ds_version")
     sel_m   = st.session_state.get("selected_model") or None
     sel_ver = st.session_state.get("selected_version")
     sel_rev = st.session_state.get("selected_revision")
 
     col1, col2 = st.columns(2)
-    col1.metric("Selected Dataset", sel_ds or "None")
+    col1.metric(
+        "Selected Dataset",
+        f"{sel_ds.split('/')[-1]} @ {sel_ds_ver}" if sel_ds and sel_ds_ver
+        else (sel_ds or "None"),
+    )
     col2.metric(
         "Selected Model",
         f"{sel_m.split('/')[-1]} @ {sel_ver}" if sel_m else "None",
@@ -605,62 +846,86 @@ with tab_runs:
             ds_key = sel_ds if sel_ds in DATASET_REGISTRY else sel_ds.split("/")[-1]
             if ds_key not in DATASET_REGISTRY:
                 st.error(f"'{ds_key}' not found in dataset_registry.json.")
-            else:
-                with st.spinner("Downloading model and running evaluation — this may take a few minutes…"):
-                    try:
-                        results, hf_revision, model_config = run_evaluation(
-                            dataset_info=DATASET_REGISTRY[ds_key],
-                            model_repo_id=sel_m,
-                            revision=sel_rev,
-                        )
-                        scores = extract_scores(results)
-                        # Competition global score: six numbers (Global Score + the
-                        # four category sub-scores + Speed-up) and the per-variable
-                        # bulb colours. Empty if the benchmark has no scoring profile.
-                        gs_numbers, gs_colors = compute_global_scores(
-                            results,
-                            DATASET_REGISTRY[ds_key]["benchmark_name"],
-                            DATASET_REGISTRY[ds_key]["config_path"],
-                        )
-                    except Exception as e:
-                        import traceback
-                        st.error(f"Evaluation failed: {e}\n\n```\n{traceback.format_exc()}\n```")
-                        st.stop()
+                st.stop()
 
-                new_row = {
-                    "Model":     sel_m.split("/")[-1],
-                    "Dataset":   ds_key,
-                    "Benchmark": DATASET_REGISTRY[ds_key]["benchmark_name"],
-                    **gs_numbers,
-                    **scores,
-                    "Timestamp": datetime.now().isoformat(timespec="seconds"),
-                }
-                # Tracking plane: log this evaluation to MLflow, linked to the
-                # exact HF commit via hf_revision. version + author + parent come
-                # from the HF version metadata (the card at this commit), so the
-                # run is attributed to whoever created the version — not whoever
-                # clicked Evaluate. Observability only — never blocks the result.
-                meta    = get_version_metadata(sel_m, hf_revision)
-                version = version_for_revision(sel_m, hf_revision)
-                author  = meta["author"]
-                tracking.log_evaluation(
-                    experiment=tracking.experiment_for(new_row["Benchmark"]),
-                    run_name=tracking.make_run_name(new_row["Model"], version or "", author),
-                    params={
-                        "hf_repo_id":     sel_m,
-                        "hf_revision":    hf_revision,
-                        "author":         author,
-                        "version":        version,
-                        "parent_version": meta["parent_version"],
-                        **gs_colors,
-                        **tracking.flatten_config(model_config),
-                    },
-                    metrics={**gs_numbers, **scores},
-                    tags={"author": author, "version": version, "hf_revision": hf_revision},
-                )
+            # Versioned (lakeFS-backed) datasets: the evaluation runs on the
+            # exact snapshot of the selected version — resolve the tag to its
+            # immutable lakeFS commit id ("tag for selection, commit for
+            # execution", same as models).
+            ds_lakefs_commit = None
+            lakefs_repo = DATASET_REGISTRY[ds_key].get("lakefs_repo")
+            if lakefs_repo:
+                if not sel_ds_ver:
+                    st.error("This dataset is versioned — select a version in the Data Hub tab first.")
+                    st.stop()
+                try:
+                    ds_lakefs_commit = lakefs_store.resolve(lakefs_repo, sel_ds_ver)
+                except Exception as e:
+                    st.error(
+                        f"Could not resolve dataset version {sel_ds_ver} in the "
+                        f"lakeFS store (is deploy/lakefs-local running?): {e}"
+                    )
+                    st.stop()
 
-                st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
-                st.rerun()
+            with st.spinner("Downloading model and running evaluation — this may take a few minutes…"):
+                try:
+                    results, hf_revision, model_config = run_evaluation(
+                        dataset_info=DATASET_REGISTRY[ds_key],
+                        model_repo_id=sel_m,
+                        revision=sel_rev,
+                        dataset_revision=ds_lakefs_commit,
+                    )
+                    scores = extract_scores(results)
+                    # Competition global score: six numbers (Global Score + the
+                    # four category sub-scores + Speed-up) and the per-variable
+                    # bulb colours. Empty if the benchmark has no scoring profile.
+                    gs_numbers, gs_colors = compute_global_scores(
+                        results,
+                        DATASET_REGISTRY[ds_key]["benchmark_name"],
+                        DATASET_REGISTRY[ds_key]["config_path"],
+                    )
+                except Exception as e:
+                    import traceback
+                    st.error(f"Evaluation failed: {e}\n\n```\n{traceback.format_exc()}\n```")
+                    st.stop()
+
+            new_row = {
+                "Model":     sel_m.split("/")[-1],
+                "Dataset":   ds_key,
+                "Benchmark": DATASET_REGISTRY[ds_key]["benchmark_name"],
+                **gs_numbers,
+                **scores,
+                "Timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            # Tracking plane: log this evaluation to MLflow, linked to the
+            # exact HF commit via hf_revision and to the exact dataset snapshot
+            # via ds_lakefs_commit. version + author + parent come from the HF
+            # version metadata (the card at this commit), so the run is
+            # attributed to whoever created the version — not whoever clicked
+            # Evaluate. Observability only — never blocks the result.
+            meta    = get_version_metadata(sel_m, hf_revision)
+            version = version_for_revision(sel_m, hf_revision)
+            author  = meta["author"]
+            tracking.log_evaluation(
+                experiment=tracking.experiment_for(new_row["Benchmark"]),
+                run_name=tracking.make_run_name(new_row["Model"], version or "", author),
+                params={
+                    "hf_repo_id":       sel_m,
+                    "hf_revision":      hf_revision,
+                    "author":           author,
+                    "version":          version,
+                    "parent_version":   meta["parent_version"],
+                    "ds_version":       sel_ds_ver,
+                    "ds_lakefs_commit": ds_lakefs_commit,
+                    **gs_colors,
+                    **tracking.flatten_config(model_config),
+                },
+                metrics={**gs_numbers, **scores},
+                tags={"author": author, "version": version, "hf_revision": hf_revision},
+            )
+
+            st.success(f"Done — {new_row['Model']} on {ds_key} added to scoreboard.")
+            st.rerun()
 
     # The runs read solely from the MLflow tracking store (the system of
     # record — Neon Postgres via MLFLOW_TRACKING_URI). sb_rows was fetched above.
@@ -670,7 +935,7 @@ with tab_runs:
         # score numbers so they sit right after the identity columns.
         _HIDE = ["run_id", "gs_test_ml", "gs_test_phys", "gs_ood_ml", "gs_ood_phys",
                  "scoring_version"]
-        _LEAD = ["Model", "Version", "Author", "Benchmark",
+        _LEAD = ["Model", "Version", "Author", "Benchmark", "Dataset Version",
                  "Global_Score", "ML_test", "Physics_test", "ML_ood", "Physics_ood", "Speed_up"]
         show_df = pd.DataFrame(sb_rows).drop(columns=_HIDE, errors="ignore")
         _ordered = [c for c in _LEAD if c in show_df.columns] + \
@@ -715,11 +980,12 @@ with tab_scoreboard:
         r.get("Benchmark", "") for r in all_rows
         if r.get("Benchmark") and profile_for(r.get("Benchmark", ""))
     })
-    c_uc, c_bm = st.columns(2)
+    c_uc, c_bm, c_dv = st.columns(3)
     c_uc.selectbox("Use Case", ["Power Grid"], index=0)
 
     if not scored_benches:
         c_bm.selectbox("Benchmark", ["— none scored yet —"], index=0, disabled=True)
+        c_dv.selectbox("Dataset Version", ["—"], index=0, disabled=True)
         st.info("No models have a Global Score yet. Run an evaluation in the "
                 "**Evaluation Runs** tab to populate the leaderboard.")
     else:
@@ -728,10 +994,29 @@ with tab_scoreboard:
         ml_labels = list(profile["ml"].keys())
         ph_labels = list(profile["physics"].keys())
 
+        bench_rows = [r for r in all_rows
+                      if r.get("Benchmark") == benchmark and r.get("Global_Score") is not None]
+
+        # Dataset-version filter, same "apples-to-apples" reasoning as Benchmark:
+        # if the test data changed between versions, scores aren't comparable, so
+        # ranking mixes only rows from the version actually selected. Runs that
+        # predate dataset versioning carry no Dataset Version and are shown
+        # unfiltered (there's nothing to filter them by).
+        scored_versions = sorted(
+            {r.get("Dataset Version") for r in bench_rows if r.get("Dataset Version")},
+            key=lambda v: (version_num(v) if version_num(v) is not None else -1),
+            reverse=True,
+        )
+        if not scored_versions:
+            c_dv.selectbox("Dataset Version", ["— not tracked —"], index=0, disabled=True)
+            ds_version_choice = None
+        else:
+            ds_version_choice = c_dv.selectbox("Dataset Version", scored_versions, index=0)
+
         # One row per (Model, Version): keep the most recent evaluation. Re-running an
         # already-scored model+version never adds a new leaderboard entry.
-        scored = [r for r in all_rows
-                  if r.get("Benchmark") == benchmark and r.get("Global_Score") is not None]
+        scored = [r for r in bench_rows
+                  if ds_version_choice is None or r.get("Dataset Version") == ds_version_choice]
         latest: dict = {}
         for r in sorted(scored, key=lambda x: x.get("Timestamp", ""), reverse=True):
             latest.setdefault((r.get("Model"), r.get("Version")), r)

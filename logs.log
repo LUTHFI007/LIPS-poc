@@ -1710,3 +1710,30 @@
 2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_or: 24348.635
 2026-06-30 14:08:15 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_ex: 36317.703
 2026-06-30 14:08:15 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-torch_fc__a622a965_DEFAULT: 0.008321530000102939
+2026-07-19 16:18:48 - TfFullyConnected          - INFO    : Model {lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT} is loaded from {/home/luthfi/lips-poc/models/lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT}
+2026-07-19 16:18:49 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT on test dataset
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 4882.94
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 6802.05
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 42.03
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 52.02
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 29197249955233792.00
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 33799906560835584.00
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_or: 0.22
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_ex: 0.22
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT: 0.09387011300714221
+2026-07-19 16:18:50 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_or: 699.945
+2026-07-19 16:18:50 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_ex: 2031.304
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT: 0.050192877009976655
+2026-07-19 16:18:50 - Benchmark                 - INFO    : Benchmark Benchmark1, evaluation using lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT on test_ood_topo dataset
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MSE_avg for a_or: 22819.69
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MSE_avg for a_ex: 37158.20
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAE_avg for a_or: 88.72
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAE_avg for a_ex: 114.18
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_avg for a_or: 81592490154524672.00
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_avg for a_ex: 105467216920576000.00
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_or: 0.35
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : MAPE_90_avg for a_ex: 0.35
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT: 0.04951352899661288
+2026-07-19 16:18:50 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_or: 1877.407
+2026-07-19 16:18:50 - PhysicsCompliances        - INFO    : the sum of negative current values (A) for a_ex: 7543.850
+2026-07-19 16:18:50 - PowerGridEvaluation       - INFO    : TIME_INF for lips-poc--powergrid-benchmark1-resnet_tf__535a8ce0_DEFAULT: 0.05979353000293486

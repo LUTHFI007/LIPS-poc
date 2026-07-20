@@ -1,48 +1,26 @@
 import pathlib
-import re
 
 from huggingface_hub import HfApi
 
+from lips_poc import hub_versioning
+
 _api = HfApi()
 
-# Versions are HF git tags named v0, v1, v2, ... on a model repo.
-_VERSION_RE = re.compile(r"^v(\d+)$")
 
-
-def _version_num(tag_name: str):
-    """Return the integer N for a tag named 'vN', else None."""
-    m = _VERSION_RE.match(tag_name)
-    return int(m.group(1)) if m else None
-
+# Versions are HF git tags named v0, v1, v2, ... on a model repo. The tag
+# helpers are shared with the Data Hub (lips_poc/hub_versioning.py).
 
 def list_versions(repo_id: str) -> list[dict]:
     """Read the model's versions from its HF git tags (v0, v1, ...), newest
     first. Each entry: {version, num, revision (commit SHA)}. Read-only; returns
     [] if the repo has no version tags or can't be read."""
-    try:
-        refs = HfApi().list_repo_refs(repo_id=repo_id, repo_type="model")
-    except Exception:
-        return []
-
-    versions = []
-    for tag in getattr(refs, "tags", []) or []:
-        num = _version_num(tag.name)
-        if num is None:
-            continue
-        versions.append({
-            "version":  tag.name,
-            "num":      num,
-            "revision": tag.target_commit,
-        })
-    versions.sort(key=lambda v: v["num"], reverse=True)
-    return versions
+    return hub_versioning.list_versions(repo_id, repo_type="model")
 
 
 def next_version(repo_id: str) -> str:
     """The next version tag to assign for a repo: 'v0' if none exist yet,
     otherwise 'v{max+1}'."""
-    versions = list_versions(repo_id)
-    return "v0" if not versions else f"v{versions[0]['num'] + 1}"
+    return hub_versioning.next_version(repo_id, repo_type="model")
 
 
 def author_from_tags(tags) -> str:
